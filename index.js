@@ -8,11 +8,9 @@ app.use(express.json());
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+const GEMINI_API_KEY = process.env.CLAUDE_API_KEY;
 
-const SYSTEM_PROMPT = `Você é a Clara, consultora de vendas da Escola Instructiva.
-
-A Escola Instructiva é uma das maiores referências no ensino técnico de eletrônica do Brasil, fundada pelo Prof. Celso Muniz — 38 anos de experiência, ex-professor do SENAI e ex-assistência técnica autorizada de Philips, Toshiba, LG, Samsung, Sony e outras multinacionais. Já impactou mais de 31 mil alunos em mais de 10 países.
+const SYSTEM_PROMPT = `Você é a Clara, consultora de vendas da Escola Instructiva, uma escola técnica em eletrônica do Brasil fundada pelo Prof. Celso Muniz — 38 anos de experiência, ex-professor do SENAI, ex-assistência técnica de Philips, Toshiba, LG, Samsung, Sony. Já impactou mais de 31 mil alunos em mais de 10 países.
 
 NOSSOS CURSOS:
 - Especialista em Reparo de Placas Eletrônicas 3.0 (995 aulas | 200h)
@@ -23,45 +21,23 @@ NOSSOS CURSOS:
 - Especialista em Manutenção de Amplificadores de Áudio 2.0 (843 aulas | 168h)
 - Especialista em Manutenção de Equipamentos Inverter 2.0 (585 aulas | 117h)
 - Eletrônica para Iniciante (343 aulas | 68h)
-- Especialista em Substituição de Componentes e Engenharia Reversa de PCB (208 aulas | 40h)
-- Especialista em Manutenção de Placas de Ar Inverter (254 aulas | 50h)
-- Especialista em Manutenção de Forno Micro-ondas (128 aulas | 25h)
-- Eletrônica Digital (127 aulas | 25h)
-- Análise de Datasheet (85 aulas | 15h)
 - E muito mais em: www.escolainstructiva.com.br
 
 DIFERENCIAIS:
-- Certificado de conclusão em todos os cursos
-- Aulas gravadas + transmissões ao vivo mensais
-- Suporte por e-mail, WhatsApp e comunidade de alunos
-- Acesso pelo celular, tablet, computador ou TV
+- Certificado em todos os cursos
+- Aulas gravadas + ao vivo mensais
+- Suporte por WhatsApp e comunidade
+- Acesso pelo celular, tablet ou PC
 - Parcelamento em até 12x no cartão
-- Pagamento via PIX e boleto
 - 7 dias de garantia sem burocracia
-- Apostilas, diagramas e materiais extras incluídos
-- Do nível básico ao avançado — não precisa ter experiência
-
-SEU PAPEL:
-- Converter leads em alunos matriculados
-- Recuperar carrinhos abandonados
-- Reativar leads que não finalizaram a compra
-- Ajudar o lead a escolher o curso ideal para seu perfil
 
 REGRAS:
-- Sempre use o nome do lead quando souber
+- Use o nome do lead sempre que souber
 - Mensagens curtas, máximo 3 parágrafos
-- Use no máximo 2 emojis por mensagem
-- Se pedirem para falar com humano, diga que vai transferir para a equipe
-- Nunca invente preços — diga para o lead acessar o site para ver o valor atual
-- Sempre que possível, direcione para: www.escolainstructiva.com.br
-
-GATILHOS DE FECHAMENTO:
-- "Mais de 31 mil alunos já transformaram suas carreiras"
-- "7 dias de garantia — sem risco nenhum"
-- "Você aprende no seu ritmo, pelo celular ou computador"
-- "Parcelamos em até 12x"
-
-TOM DE VOZ: Próximo, confiante e empático. Como uma consultora experiente que realmente quer ajudar o lead a crescer na área técnica.`;
+- No máximo 2 emojis por mensagem
+- Se pedirem humano, diga que vai transferir
+- Nunca invente preços, direcione para o site
+- Tom: próximo, confiante e empático`;
 
 async function sendWhatsAppMessage(to, message) {
   await axios.post(
@@ -72,30 +48,18 @@ async function sendWhatsAppMessage(to, message) {
       type: 'text',
       text: { body: message }
     },
-    {
-      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
-    }
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
   );
 }
 
-async function askClara(userMessage, context) {
+async function askClara(userMessage) {
   const response = await axios.post(
-    'https://api.anthropic.com/v1/messages',
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
     {
-      model: 'claude-opus-4-6',
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: context + '\n\nMensagem do lead: ' + userMessage }]
-    },
-    {
-      headers: {
-        'x-api-key': CLAUDE_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json'
-      }
+      contents: [{ parts: [{ text: SYSTEM_PROMPT + '\n\nMensagem do lead: ' + userMessage }] }]
     }
   );
-  return response.data.content[0].text;
+  return response.data.candidates[0].content.parts[0].text;
 }
 
 app.get('/webhook', (req, res) => {
@@ -115,7 +79,7 @@ app.post('/webhook', async (req, res) => {
     if (!message) return;
     const from = message.from;
     const text = message.text?.body || '';
-    const reply = await askClara(text, '');
+    const reply = await askClara(text);
     await sendWhatsAppMessage(from, reply);
   } catch (err) {
     console.error('Erro:', err.message);
@@ -133,16 +97,14 @@ app.post('/hotmart', async (req, res) => {
 
     let message = '';
     if (event === 'PURCHASE_ABANDONED') {
-      message = `Oi ${name}! 😊 Vi que você se interessou pelo ${product}. Posso te ajudar com alguma dúvida ou condição especial para concluir sua matrícula?`;
+      message = `Oi ${name}! 😊 Vi que você se interessou pelo ${product}. Posso te ajudar com alguma dúvida ou condição especial?`;
     } else if (event === 'PURCHASE_CANCELED') {
-      message = `Oi ${name}, tudo bem? Vi que sua matrícula no ${product} não foi concluída. Aconteceu algo? Posso ajudar com parcelamento ou mais informações! 🎓`;
+      message = `Oi ${name}, tudo bem? Vi que sua matrícula no ${product} não foi concluída. Posso ajudar! 🎓`;
     } else if (event === 'PURCHASE_BILLET_PRINTED') {
-      message = `Oi ${name}! Seu boleto do ${product} está aguardando pagamento. Lembra que temos 7 dias de garantia — sem risco! Posso ajudar com alguma dúvida? 😊`;
+      message = `Oi ${name}! Seu boleto do ${product} está aguardando. Temos 7 dias de garantia — sem risco! 😊`;
     }
 
-    if (message && phone) {
-      await sendWhatsAppMessage(phone, message);
-    }
+    if (message && phone) await sendWhatsAppMessage(phone, message);
   } catch (err) {
     console.error('Erro Hotmart:', err.message);
   }
