@@ -7,8 +7,8 @@ const app = express();
 app.use(express.json());
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.ID_DO_NÚMERO_DE_TELEFONE;
-const VERIFY_TOKEN = process.env.VERIFICAR_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const GEMINI_API_KEY = process.env.CLAUDE_API_KEY;
 
 const supabase = createClient(
