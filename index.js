@@ -1,10 +1,13 @@
 require('dotenv').config();
+
 const express = require('express');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
+
 app.use(express.json());
+app.use(express.static('public'));
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || process.env.ID_DO_NÚMERO_DE_TELEFONE;
@@ -106,7 +109,9 @@ async function sendWhatsAppMessage(to, message) {
       messaging_product: 'whatsapp',
       to,
       type: 'text',
-      text: { body: message }
+      text: {
+        body: message
+      }
     },
     {
       headers: {
@@ -136,7 +141,11 @@ ${userMessage}
     {
       contents: [
         {
-          parts: [{ text: prompt }]
+          parts: [
+            {
+              text: prompt
+            }
+          ]
         }
       ]
     }
@@ -225,7 +234,7 @@ app.post('/hotmart', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('Clara da Escola Instructiva está online com Supabase! 🤖');
+  res.sendFile(__dirname + '/public/index.html');
 });
 
 const PORT = process.env.PORT || process.env.PORTA || 3000;
