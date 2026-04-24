@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clara — Instructiva</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --or:#E8610A;--orl:#F26522;--ord:#C04F08;
+  --bg:#0D0D0D;--s1:#141414;--s2:#1C1C1C;--s3:#242424;--s4:#2C2C2C;
+  --b1:rgba(255,255,255,0.06);--b2:rgba(255,255,255,0.1);
+  --t1:#EBEBEB;--t2:#888;--t3:#555;--t4:#333;
+  --gr:#16A34A;--grl:#22C55E;
+  --yw:#D97706;--ywl:#F59E0B;
+  --rd:#DC2626;--rdl:#EF4444;
+  --bl:#2563EB;--bll:#3B82F6;
+  --r:8px;--r2:12px;
+}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--t1);font-family:'Inter',sans-serif;font-size:13px;line-height:1.5}
+.app{display:flex;height:100vh}
+
+.sb{width:220px;background:var(--s1);border-right:1px solid var(--b1);display:flex;flex-direction:column;flex-shrink:0}
+.sb-brand{padding:18px 16px;border-bottom:1px solid var(--b1);display:flex;align-items:center;gap:10px}
+.sb-icon{width:30px;height:30px;background:var(--or);border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sb-icon svg{width:15px;height:15px;fill:white}
+.sb-name{font-size:13px;font-weight:600}
+.sb-tag{font-size:10px;color:var(--t3);margin-top:1px}
+.sb-nav{padding:10px 8px;flex:1;overflow-y:auto}
+.sb-sec{padding:12px 8px 5px;font-size:9.5px;color:var(--t4);text-transform:uppercase;letter-spacing:1px;font-weight:500}
+.ni{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:var(--r);cursor:pointer;color:var(--t3);transition:all .15s;margin-bottom:1px;font-size:12.5px}
+.ni:hover{background:var(--s3);color:var(--t2)}
+.ni.active{background:rgba(232,97,10,0.12);color:var(--or)}
+.ni svg{width:14px;height:14px;flex-shrink:0;opacity:.6}
+.ni.active svg{opacity:1}
+.nb{margin-left:auto;background:var(--or);color:white;font-size:9px;padding:1px 5px;border-radius:9px;font-weight:600}
+.nd{margin-left:auto;width:6px;height:6px;background:var(--grl);border-radius:50%}
+.sb-foot{padding:10px 8px;border-top:1px solid var(--b1)}
+.sb-user{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:var(--r);cursor:pointer;transition:background .15s}
+.sb-user:hover{background:var(--s3)}
+.sb-av{width:26px;height:26px;background:rgba(232,97,10,0.2);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:var(--or);flex-shrink:0}
+.sb-uname{font-size:12px;font-weight:500}
+.sb-role{font-size:10px;color:var(--t3)}
+
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+.screen{display:none;flex:1;flex-direction:column;overflow:hidden}
+.screen.show{display:flex}
+
+.topbar{height:50px;background:var(--s1);border-bottom:1px solid var(--b1);display:flex;align-items:center;padding:0 18px;gap:10px;flex-shrink:0}
+.tb-title{font-size:14px;font-weight:600;flex:1}
+.tb-acts{display:flex;align-items:center;gap:8px}
+.status-pill{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--t2);background:var(--s2);border:1px solid var(--b1);padding:4px 10px;border-radius:20px}
+.sp-dot{width:6px;height:6px;border-radius:50%;background:var(--grl);box-shadow:0 0 5px var(--grl)}
+.btn{padding:6px 13px;border-radius:var(--r);font-size:12px;cursor:pointer;border:none;font-weight:500;font-family:'Inter',sans-serif;transition:all .15s}
+.btn-pr{background:var(--or);color:white}
+.btn-pr:hover{background:var(--orl)}
+.btn-sec{background:transparent;color:var(--t2);border:1px solid var(--b2)}
+.btn-sec:hover{border-color:var(--or);color:var(--or)}
+.ib{width:30px;height:30px;background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--t3);transition:all .15s}
+.ib:hover{color:var(--t2);border-color:var(--b2)}
+.ib svg{width:13px;height:13px}
+
+.tag{font-size:10px;padding:2px 7px;border-radius:20px;font-weight:500;white-space:nowrap}
+.t-or{background:rgba(232,97,10,0.12);color:var(--orl)}
+.t-gr{background:rgba(22,163,74,0.1);color:var(--grl)}
+.t-yw{background:rgba(217,119,6,0.1);color:var(--ywl)}
+.t-rd{background:rgba(220,38,38,0.1);color:var(--rdl)}
+.t-bl{background:rgba(37,99,235,0.1);color:var(--bll)}
+.t-pur{background:rgba(124,58,237,0.1);color:#A78BFA}
+
+.card{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r2)}
+.ch{padding:13px 15px;border-bottom:1px solid var(--b1);display:flex;align-items:center;justify-content:space-between}
+.ct{font-size:12.5px;font-weight:600}
+.cs{font-size:11px;color:var(--t3)}
+
+/* DASHBOARD */
+.dl{flex:1;display:flex;overflow:hidden}
+.dm{flex:1;padding:18px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+.dsd{width:268px;border-left:1px solid var(--b1);overflow-y:auto;display:flex;flex-direction:column;flex-shrink:0}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.kpi{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r2);padding:14px;transition:border-color .2s}
+.kpi:hover{border-color:var(--b2)}
+.kpi-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.kpi-ic{width:26px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center}
+.kpi-ic svg{width:13px;height:13px}
+.ic-or{background:rgba(232,97,10,0.12);color:var(--or)}
+.ic-gr{background:rgba(22,163,74,0.1);color:var(--grl)}
+.ic-bl{background:rgba(37,99,235,0.1);color:var(--bll)}
+.ic-yw{background:rgba(217,119,6,0.1);color:var(--ywl)}
+.kv{font-size:22px;font-weight:600;letter-spacing:-.5px}
+.kl{font-size:11px;color:var(--t3);margin-top:2px}
+.kc{font-size:10px;margin-top:5px}
+.cu{color:var(--grl)}.cd{color:var(--rdl)}
+
+.chart-pair{display:grid;grid-template-columns:1.5fr 1fr;gap:12px}
+.bars-area{padding:14px}
+.bars{display:flex;align-items:flex-end;gap:5px;height:68px}
+.bc{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px}
+.bb{width:100%;border-radius:3px 3px 0 0;background:var(--s3);cursor:pointer;transition:background .15s}
+.bb:hover,.bb.hi{background:var(--or)}
+.bl{font-size:9px;color:var(--t4)}
+.bc.tod .bl{color:var(--or)}
+
+.fn-area{padding:13px 15px}
+.fn-row{display:flex;align-items:center;gap:9px;margin-bottom:8px}
+.fn-l{font-size:11px;color:var(--t3);width:76px;flex-shrink:0}
+.fn-t{flex:1;background:var(--s3);border-radius:3px;height:5px;overflow:hidden}
+.fn-f{height:100%;background:var(--or);border-radius:3px}
+.fn-v{font-size:11px;font-weight:600;width:22px;text-align:right}
+
+.sb-blk{padding:14px;border-bottom:1px solid var(--b1)}
+.sb-bt{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.7px;margin-bottom:10px}
+.act-it{display:flex;gap:9px;margin-bottom:10px;align-items:flex-start}
+.ad{width:5px;height:5px;border-radius:50%;flex-shrink:0;margin-top:6px}
+.ad-or{background:var(--or)}.ad-gr{background:var(--grl)}.ad-yw{background:var(--ywl)}
+.at{font-size:11.5px;color:var(--t2);line-height:1.4}
+.ati{font-size:10px;color:var(--t4);margin-top:1px}
+.tc-row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--b1)}
+.tc-row:last-child{border-bottom:none}
+.tc-n{font-size:11.5px;color:var(--t2)}
+.tc-v{font-size:11px;font-weight:600}
+.st-row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--b1)}
+.st-row:last-child{border-bottom:none}
+.st-l{font-size:11.5px;color:var(--t2)}
+
+/* INBOX */
+.il{flex:1;display:flex;overflow:hidden}
+.cl{width:272px;border-right:1px solid var(--b1);display:flex;flex-direction:column;flex-shrink:0}
+.cl-hd{padding:11px 13px;border-bottom:1px solid var(--b1)}
+.cl-sr{width:100%;background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:7px 11px;color:var(--t1);font-size:12px;outline:none;font-family:'Inter',sans-serif}
+.cl-sr:focus{border-color:rgba(232,97,10,.35)}
+.cl-fs{display:flex;gap:5px;margin-top:8px}
+.cf{font-size:10px;padding:3px 8px;border-radius:20px;cursor:pointer;border:1px solid var(--b1);color:var(--t3);transition:all .15s}
+.cf.on{background:rgba(232,97,10,.1);border-color:rgba(232,97,10,.3);color:var(--or)}
+.cl-list{overflow-y:auto;flex:1}
+.ci{padding:11px 13px;border-bottom:1px solid var(--b1);cursor:pointer;display:flex;gap:9px;transition:background .1s}
+.ci:hover{background:var(--s2)}
+.ci.sel{background:rgba(232,97,10,.06);border-left:2px solid var(--or)}
+.av{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;flex-shrink:0}
+.av-or{background:rgba(232,97,10,.15);color:var(--or)}
+.av-bl{background:rgba(37,99,235,.15);color:var(--bll)}
+.av-gr{background:rgba(22,163,74,.15);color:var(--grl)}
+.av-yw{background:rgba(217,119,6,.15);color:var(--ywl)}
+.av-pu{background:rgba(124,58,237,.15);color:#A78BFA}
+.ci-inf{flex:1;min-width:0}
+.ci-nm{font-size:12px;font-weight:500}
+.ci-pv{font-size:11px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.ci-mt{flex-shrink:0;text-align:right}
+.ci-tm{font-size:10px;color:var(--t4)}
+.ci-bg{width:14px;height:14px;background:var(--or);border-radius:50%;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:3px 0 0 auto;color:white}
+
+.chat{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+.chat-hd{padding:11px 15px;border-bottom:1px solid var(--b1);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;background:var(--s1)}
+.cu{display:flex;align-items:center;gap:9px}
+.cn{font-size:13px;font-weight:600}
+.cnu{font-size:11px;color:var(--t3)}
+.ca{display:flex;gap:5px;align-items:center}
+.msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:9px;background:var(--bg)}
+.msg{max-width:68%}
+.m-in{align-self:flex-start}
+.m-out{align-self:flex-end}
+.mw{font-size:10px;color:var(--t4);margin-bottom:3px}
+.m-out .mw{text-align:right}
+.mb{padding:9px 12px;border-radius:10px;font-size:12px;line-height:1.55}
+.m-in .mb{background:var(--s2);border-bottom-left-radius:2px}
+.m-out .mb{background:var(--or);color:white;border-bottom-right-radius:2px}
+.mt{font-size:10px;color:var(--t4);margin-top:2px}
+.m-out .mt{text-align:right}
+.chat-ft{padding:11px 15px;border-top:1px solid var(--b1);display:flex;gap:7px;flex-shrink:0;background:var(--s1)}
+.chat-ft input{flex:1;background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:8px 12px;color:var(--t1);font-size:12px;outline:none;font-family:'Inter',sans-serif}
+.chat-ft input:focus{border-color:rgba(232,97,10,.35)}
+.ai-ind{font-size:10px;padding:2px 7px;background:rgba(232,97,10,.1);color:var(--or);border-radius:20px;border:1px solid rgba(232,97,10,.2);white-space:nowrap}
+
+.info-panel{width:232px;border-left:1px solid var(--b1);overflow-y:auto;flex-shrink:0}
+.ip-blk{padding:13px;border-bottom:1px solid var(--b1)}
+.ip-tt{font-size:9.5px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.7px;margin-bottom:9px}
+.ip-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0}
+.ip-k{font-size:11px;color:var(--t3)}
+.ip-v{font-size:11px;font-weight:500}
+.ip-ta{width:100%;background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:7px 9px;color:var(--t2);font-size:11px;outline:none;font-family:'Inter',sans-serif;min-height:56px;resize:none}
+.ip-ta:focus{border-color:rgba(232,97,10,.3)}
+
+/* CANAIS */
+.cc{flex:1;padding:18px;overflow-y:auto}
+.cc-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}
+.wc{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r2);padding:15px;transition:border-color .2s}
+.wc:hover{border-color:var(--b2)}
+.wc-hd{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px}
+.wc-l{display:flex;align-items:center;gap:9px}
+.wc-ic{width:34px;height:34px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.wc-nm{font-size:12.5px;font-weight:600}
+.wc-nu{font-size:11px;color:var(--t3);margin-top:1px}
+.wc-st{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;padding-top:11px;border-top:1px solid var(--b1)}
+.ws{display:flex;flex-direction:column;gap:2px}
+.wsv{font-size:14px;font-weight:600}
+.wsl{font-size:10px;color:var(--t3)}
+.add-ch{background:var(--s1);border:1.5px dashed var(--b1);border-radius:var(--r2);padding:22px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;gap:6px;transition:all .2s}
+.add-ch:hover{border-color:rgba(232,97,10,.4);background:rgba(232,97,10,.03)}
+.add-ch svg{width:20px;height:20px;color:var(--t4)}
+.add-ch:hover svg{color:var(--or)}
+.add-ch span{font-size:12px;color:var(--t3)}
+.add-ch:hover span{color:var(--or)}
+
+/* DISPARADOR */
+.disp-l{flex:1;display:flex;overflow:hidden}
+.disp-m{flex:1;padding:18px;overflow-y:auto}
+.disp-sd{width:248px;border-left:1px solid var(--b1);overflow-y:auto;flex-shrink:0}
+.fg{display:flex;flex-direction:column;gap:4px}
+.fg label{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;font-weight:500}
+.fg input,.fg select,.fg textarea{background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:8px 11px;color:var(--t1);font-size:12px;outline:none;font-family:'Inter',sans-serif;transition:border-color .15s}
+.fg input:focus,.fg select:focus,.fg textarea:focus{border-color:rgba(232,97,10,.35)}
+.fg select option{background:var(--s2)}
+.fg textarea{min-height:68px;resize:vertical}
+.camp{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r2);padding:13px 15px;display:flex;align-items:center;gap:11px;margin-bottom:7px;transition:border-color .15s}
+.camp:hover{border-color:var(--b2)}
+.camp-ic{width:30px;height:30px;border-radius:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.camp-inf{flex:1;min-width:0}
+.camp-nm{font-size:12.5px;font-weight:500}
+.camp-mt{font-size:11px;color:var(--t3);margin-top:1px}
+.pw{width:110px;flex-shrink:0}
+.pw-lbl{font-size:10px;color:var(--t3);margin-bottom:3px}
+.pt{background:var(--s3);border-radius:3px;height:3px;overflow:hidden}
+.pf{height:100%;border-radius:3px;background:var(--or)}
+.dss{padding:13px;border-bottom:1px solid var(--b1)}
+.dss-t{font-size:9.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.7px;font-weight:500;margin-bottom:8px}
+.dss-n{font-size:20px;font-weight:600;margin-bottom:1px}
+.dss-l{font-size:11px;color:var(--t3)}
+
+/* CONFIG */
+.cfg-l{flex:1;display:flex;overflow:hidden}
+.cfg-nav{width:192px;border-right:1px solid var(--b1);padding:14px 8px;overflow-y:auto;flex-shrink:0}
+.cni{padding:7px 9px;border-radius:var(--r);cursor:pointer;font-size:12px;color:var(--t3);display:flex;align-items:center;gap:7px;margin-bottom:1px;transition:all .15s}
+.cni:hover{background:var(--s2);color:var(--t2)}
+.cni.active{background:rgba(232,97,10,.1);color:var(--or)}
+.cni svg{width:13px;height:13px;flex-shrink:0}
+.cfg-cnt{flex:1;padding:18px;overflow-y:auto}
+.cfg-sc{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r2);margin-bottom:12px;overflow:hidden}
+.cfg-sh{padding:12px 15px;border-bottom:1px solid var(--b1);font-size:12.5px;font-weight:600}
+.cfg-rw{padding:11px 15px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--b1)}
+.cfg-rw:last-child{border-bottom:none}
+.cfg-rl{font-size:12px;font-weight:500}
+.cfg-rd{font-size:11px;color:var(--t3);margin-top:1px}
+.tg{width:32px;height:18px;border-radius:9px;cursor:pointer;position:relative;transition:background .2s;flex-shrink:0}
+.tg.on{background:var(--or)}.tg.off{background:var(--s4)}
+.tg::after{content:'';width:12px;height:12px;background:white;border-radius:50%;position:absolute;top:3px;transition:left .2s}
+.tg.on::after{left:17px}.tg.off::after{left:3px}
+.cfg-inp{background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:7px 10px;color:var(--t1);font-size:12px;outline:none;font-family:'Inter',sans-serif;width:200px}
+.cfg-inp:focus{border-color:rgba(232,97,10,.35)}
+
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--s4);border-radius:3px}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="sb">
+    <div class="sb-brand">
+      <div class="sb-icon"><svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
+      <div><div class="sb-name">Instructiva</div><div class="sb-tag">Clara AI</div></div>
+    </div>
+    <div class="sb-nav">
+      <div class="sb-sec">Principal</div>
+      <div class="ni active" onclick="go('dash',this)">
+        <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+        Dashboard
+      </div>
+      <div class="ni" onclick="go('inbox',this)">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M1 2h14a1 1 0 011 1v9a1 1 0 01-1 1H4l-3 2V3a1 1 0 011-1z"/></svg>
+        Caixa de Entrada
+        <span class="nb">12</span>
+      </div>
+      <div class="sb-sec" style="margin-top:6px">Operações</div>
+      <div class="ni" onclick="go('canais',this)">
+        <svg viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="3"/><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 2a5 5 0 110 10A5 5 0 018 3z" opacity=".4"/></svg>
+        Canais
+        <span class="nd"></span>
+      </div>
+      <div class="ni" onclick="go('disp',this)">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 8l12-6-4 6 4 6z"/></svg>
+        Disparador
+      </div>
+      <div class="sb-sec" style="margin-top:6px">Sistema</div>
+      <div class="ni" onclick="go('cfg',this)">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 10a2 2 0 100-4 2 2 0 000 4zM8 1l1.2 2h2.5l.8 2-2 2 1 2.3-1.7 1.7-2.3-.8-2.3.8-1.7-1.7 1-2.3-2-2 .8-2h2.5z"/></svg>
+        Configurações
+      </div>
+    </div>
+    <div class="sb-foot">
+      <div class="sb-user">
+        <div class="sb-av">TN</div>
+        <div><div class="sb-uname">Thiago</div><div class="sb-role">Administrador</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="main">
+
+    <!-- DASHBOARD -->
+    <div class="screen show" id="s-dash">
+      <div class="topbar">
+        <div class="tb-title">Dashboard</div>
+        <div class="tb-acts">
+          <div class="status-pill"><span class="sp-dot"></span>Clara operacional</div>
+          <button class="btn btn-sec">Exportar</button>
+          <button class="btn btn-pr" onclick="go('disp',document.querySelectorAll('.ni')[3])">+ Nova campanha</button>
+        </div>
+      </div>
+      <div class="dl">
+        <div class="dm">
+          <div class="kpis">
+            <div class="kpi">
+              <div class="kpi-top"><div class="kpi-ic ic-or"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M1 2h14a1 1 0 011 1v9a1 1 0 01-1 1H4l-3 2V3a1 1 0 011-1z"/></svg></div><span class="tag t-or">+12</span></div>
+              <div class="kv">47</div><div class="kl">Conversas hoje</div><div class="kc cu">↑ vs 35 ontem</div>
+            </div>
+            <div class="kpi">
+              <div class="kpi-top"><div class="kpi-ic ic-gr"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 5H15l-4.5 3.3 1.7 5.2L8 11.5 3.8 14.5 5.5 9.3 1 6h5.5z"/></svg></div><span class="tag t-gr">+3</span></div>
+              <div class="kv">8</div><div class="kl">Matrículas fechadas</div><div class="kc cu">↑ vs 5 ontem</div>
+            </div>
+            <div class="kpi">
+              <div class="kpi-top"><div class="kpi-ic ic-yw"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a6 6 0 100 12A6 6 0 008 2zm0 2a4 4 0 110 8A4 4 0 018 4zM8 5v3l2 1.5-.8 1.3L7 9V5z"/></svg></div><span class="tag t-yw">68%</span></div>
+              <div class="kv">4s</div><div class="kl">Tempo de resposta</div><div class="kc cu">↑ 24h automático</div>
+            </div>
+            <div class="kpi">
+              <div class="kpi-top"><div class="kpi-ic ic-bl"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 13l3-4 3 2 4-6 2 1.5v5a1 1 0 01-1 1H3a1 1 0 01-1-1z"/></svg></div><span class="tag t-bl">+2</span></div>
+              <div class="kv">R$4.2k</div><div class="kl">Receita gerada</div><div class="kc cu">↑ vs R$2.8k ontem</div>
+            </div>
+          </div>
+          <div class="chart-pair">
+            <div class="card">
+              <div class="ch"><span class="ct">Atividade semanal</span><span class="cs">últimos 7 dias</span></div>
+              <div class="bars-area">
+                <div class="bars">
+                  <div class="bc"><div class="bb" style="height:42%"></div><div class="bl">Seg</div></div>
+                  <div class="bc"><div class="bb" style="height:58%"></div><div class="bl">Ter</div></div>
+                  <div class="bc"><div class="bb" style="height:34%"></div><div class="bl">Qua</div></div>
+                  <div class="bc"><div class="bb" style="height:70%"></div><div class="bl">Qui</div></div>
+                  <div class="bc"><div class="bb" style="height:52%"></div><div class="bl">Sex</div></div>
+                  <div class="bc"><div class="bb" style="height:28%"></div><div class="bl">Sáb</div></div>
+                  <div class="bc tod"><div class="bb hi" style="height:100%"></div><div class="bl">Hoje</div></div>
+                </div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="ch"><span class="ct">Funil de vendas</span><span class="cs">hoje</span></div>
+              <div class="fn-area">
+                <div class="fn-row"><div class="fn-l">Receberam</div><div class="fn-t"><div class="fn-f" style="width:100%"></div></div><div class="fn-v">47</div></div>
+                <div class="fn-row"><div class="fn-l">Responderam</div><div class="fn-t"><div class="fn-f" style="width:68%"></div></div><div class="fn-v">32</div></div>
+                <div class="fn-row"><div class="fn-l">Negociando</div><div class="fn-t"><div class="fn-f" style="width:40%"></div></div><div class="fn-v">19</div></div>
+                <div class="fn-row"><div class="fn-l">Fecharam</div><div class="fn-t"><div class="fn-f" style="width:17%"></div></div><div class="fn-v">8</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="dsd">
+          <div class="sb-blk">
+            <div class="sb-bt">Atividade recente</div>
+            <div class="act-it"><div class="ad ad-gr"></div><div><div class="at">João Costa matriculou — Inversores Solares 2.0</div><div class="ati">há 8 min</div></div></div>
+            <div class="act-it"><div class="ad ad-or"></div><div><div class="at">Clara iniciou recuperação de carrinho — Pedro Lima</div><div class="ati">há 22 min</div></div></div>
+            <div class="act-it"><div class="ad ad-yw"></div><div><div class="at">Fernanda perguntou sobre parcelamento</div><div class="ati">há 47 min</div></div></div>
+            <div class="act-it"><div class="ad ad-gr"></div><div><div class="at">Ricardo matriculou — Eletrônica de Potência</div><div class="ati">há 1h 12min</div></div></div>
+            <div class="act-it"><div class="ad ad-or"></div><div><div class="at">Disparo "Leads Abril" finalizado — 320 leads</div><div class="ati">há 2h 34min</div></div></div>
+          </div>
+          <div class="sb-blk">
+            <div class="sb-bt">Cursos mais vendidos hoje</div>
+            <div class="tc-row"><div class="tc-n">Inversores Solares 2.0</div><div class="tc-v">3</div></div>
+            <div class="tc-row"><div class="tc-n">Reparo de Placas 3.0</div><div class="tc-v">2</div></div>
+            <div class="tc-row"><div class="tc-n">Eletrônica de Potência</div><div class="tc-v">2</div></div>
+            <div class="tc-row"><div class="tc-n">Fontes Chaveadas 2.0</div><div class="tc-v">1</div></div>
+          </div>
+          <div class="sb-blk">
+            <div class="sb-bt">Status do sistema</div>
+            <div class="st-row"><div class="st-l">WhatsApp API</div><span class="tag t-gr">ativo</span></div>
+            <div class="st-row"><div class="st-l">Google Gemini</div><span class="tag t-gr">ativo</span></div>
+            <div class="st-row"><div class="st-l">Hotmart Webhook</div><span class="tag t-yw">pendente</span></div>
+            <div class="st-row"><div class="st-l">Railway Server</div><span class="tag t-gr">online</span></div>
+          </div>
+          <div class="sb-blk">
+            <div class="sb-bt">Carrinhos recuperados</div>
+            <div class="st-row"><div class="st-l">Hoje</div><div style="font-size:11px;font-weight:600">5</div></div>
+            <div class="st-row"><div class="st-l">Esta semana</div><div style="font-size:11px;font-weight:600">18</div></div>
+            <div class="st-row"><div class="st-l">Este mês</div><div style="font-size:11px;font-weight:600">67</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INBOX -->
+    <div class="screen" id="s-inbox">
+      <div class="topbar">
+        <div class="tb-title">Caixa de Entrada</div>
+        <div class="tb-acts">
+          <span class="ai-ind">Clara ativa</span>
+          <div class="ib"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M1 3h14M3 7h10M5 11h6"/></svg></div>
+        </div>
+      </div>
+      <div class="il">
+        <div class="cl">
+          <div class="cl-hd">
+            <input class="cl-sr" placeholder="Buscar...">
+            <div class="cl-fs">
+              <div class="cf on">Todas</div>
+              <div class="cf">Ativas</div>
+              <div class="cf">Fechadas</div>
+            </div>
+          </div>
+          <div class="cl-list">
+            <div class="ci sel" onclick="selC(this,'Marcos Ribeiro','+55 44 99850-0211','MR','av-or','negociando','t-yw','Inversores Solares 2.0','23 abr 2026','Hotmart Lead')">
+              <div class="av av-or">MR</div>
+              <div class="ci-inf"><div class="ci-nm">Marcos Ribeiro</div><div class="ci-pv">Quero saber sobre inversores</div></div>
+              <div class="ci-mt"><div class="ci-tm">17:04</div><div class="ci-bg">2</div></div>
+            </div>
+            <div class="ci" onclick="selC(this,'Ana Silva','+55 11 98765-4321','AS','av-bl','novo','t-or','Eletrônica para Iniciante','24 abr 2026','Orgânico')">
+              <div class="av av-bl">AS</div>
+              <div class="ci-inf"><div class="ci-nm">Ana Silva</div><div class="ci-pv">Qual a diferença entre os planos?</div></div>
+              <div class="ci-mt"><div class="ci-tm">16:48</div><div class="ci-bg">1</div></div>
+            </div>
+            <div class="ci" onclick="selC(this,'João Costa','+55 21 91234-5678','JC','av-gr','fechado','t-gr','Reparo de Placas 3.0','24 abr 2026','Disparo')">
+              <div class="av av-gr">JC</div>
+              <div class="ci-inf"><div class="ci-nm">João Costa</div><div class="ci-pv">Vou efetuar o pagamento agora</div></div>
+              <div class="ci-mt"><div class="ci-tm">16:22</div></div>
+            </div>
+            <div class="ci" onclick="selC(this,'Pedro Lima','+55 31 99999-0000','PL','av-yw','recuperação','t-rd','Fontes Chaveadas 2.0','23 abr 2026','Carrinho')">
+              <div class="av av-yw">PL</div>
+              <div class="ci-inf"><div class="ci-nm">Pedro Lima</div><div class="ci-pv">Carrinho abandonado — Fontes</div></div>
+              <div class="ci-mt"><div class="ci-tm">15:55</div><div class="ci-bg">3</div></div>
+            </div>
+            <div class="ci" onclick="selC(this,'Fernanda Lopes','+55 85 98888-1111','FL','av-pu','negociando','t-yw','Amplificadores 2.0','22 abr 2026','Hotmart Lead')">
+              <div class="av av-pu">FL</div>
+              <div class="ci-inf"><div class="ci-nm">Fernanda Lopes</div><div class="ci-pv">Tem certificado? Posso parcelar?</div></div>
+              <div class="ci-mt"><div class="ci-tm">15:30</div></div>
+            </div>
+          </div>
+        </div>
+        <div class="chat">
+          <div class="chat-hd">
+            <div class="cu">
+              <div class="av av-or" id="c-av">MR</div>
+              <div><div class="cn" id="c-nm">Marcos Ribeiro</div><div class="cnu" id="c-nu">+55 44 99850-0211</div></div>
+            </div>
+            <div class="ca">
+              <span class="tag t-yw" id="c-st">negociando</span>
+              <div class="ib" title="Pausar Clara"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="2" width="4" height="12" rx="1"/><rect x="9" y="2" width="4" height="12" rx="1"/></svg></div>
+            </div>
+          </div>
+          <div class="msgs" id="msgs">
+            <div class="msg m-in"><div class="mw">Marcos Ribeiro</div><div class="mb">Oi, quero saber sobre o curso de inversores solares</div><div class="mt">17:01</div></div>
+            <div class="msg m-out"><div class="mw">Clara</div><div class="mb">Oi Marcos! Que ótima escolha 😊 O Especialista em Manutenção de Inversores Solares 2.0 tem 715 aulas e 150h de conteúdo. Você já tem experiência com eletrônica?</div><div class="mt">17:01</div></div>
+            <div class="msg m-in"><div class="mw">Marcos Ribeiro</div><div class="mb">Tenho um pouco, trabalho com manutenção</div><div class="mt">17:03</div></div>
+            <div class="msg m-out"><div class="mw">Clara</div><div class="mb">Perfeito! Com sua experiência você vai avançar rápido. O curso inclui certificado, suporte e 7 dias de garantia. Posso te passar o link para matrícula? 🎓</div><div class="mt">17:04</div></div>
+          </div>
+          <div class="chat-ft">
+            <input id="mi" placeholder="Mensagem manual — pausa a Clara nesta conversa..." onkeydown="if(event.key==='Enter')sm()">
+            <button class="btn btn-pr" onclick="sm()">Enviar</button>
+          </div>
+        </div>
+        <div class="info-panel">
+          <div class="ip-blk">
+            <div class="ip-tt">Lead</div>
+            <div class="ip-row"><div class="ip-k">Nome</div><div class="ip-v" id="ip-nm">Marcos Ribeiro</div></div>
+            <div class="ip-row"><div class="ip-k">Telefone</div><div class="ip-v" id="ip-tl">+55 44 99850-0211</div></div>
+            <div class="ip-row"><div class="ip-k">Status</div><div id="ip-st"><span class="tag t-yw">negociando</span></div></div>
+            <div class="ip-row"><div class="ip-k">1º contato</div><div class="ip-v" id="ip-dt">23 abr 2026</div></div>
+            <div class="ip-row"><div class="ip-k">Origem</div><div class="ip-v" id="ip-or">Hotmart Lead</div></div>
+          </div>
+          <div class="ip-blk">
+            <div class="ip-tt">Interesse</div>
+            <div style="font-size:11.5px;color:var(--t2)" id="ip-cu">Inversores Solares 2.0</div>
+          </div>
+          <div class="ip-blk">
+            <div class="ip-tt">Anotações</div>
+            <textarea class="ip-ta" placeholder="Adicionar anotação..."></textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CANAIS -->
+    <div class="screen" id="s-canais">
+      <div class="topbar">
+        <div class="tb-title">Canais</div>
+        <div class="tb-acts">
+          <button class="btn btn-sec">Documentação</button>
+          <button class="btn btn-pr">+ Conectar WABA</button>
+        </div>
+      </div>
+      <div class="cc">
+        <div style="font-size:11px;color:var(--t3);margin-bottom:14px">Contas do WhatsApp Business API conectadas à Clara</div>
+        <div class="cc-grid">
+          <div class="wc">
+            <div class="wc-hd">
+              <div class="wc-l">
+                <div class="wc-ic" style="background:rgba(22,163,74,.1)"><svg width="16" height="16" viewBox="0 0 24 24" fill="#22C55E"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/></svg></div>
+                <div><div class="wc-nm">Clara — Instructiva</div><div class="wc-nu">+55 44 9748-9947</div></div>
+              </div>
+              <span class="tag t-gr">ativo</span>
+            </div>
+            <div class="wc-st">
+              <div class="ws"><div class="wsv">250</div><div class="wsl">limite/dia</div></div>
+              <div class="ws"><div class="wsv">47</div><div class="wsl">hoje</div></div>
+              <div class="ws"><div class="wsv">1.2k</div><div class="wsl">este mês</div></div>
+            </div>
+          </div>
+          <div class="wc" style="opacity:.5">
+            <div class="wc-hd">
+              <div class="wc-l">
+                <div class="wc-ic" style="background:rgba(217,119,6,.1)"><svg width="16" height="16" viewBox="0 0 24 24" fill="#F59E0B"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/></svg></div>
+                <div><div class="wc-nm">Equipe Prof. Celso</div><div class="wc-nu">+55 44 9748-7745</div></div>
+              </div>
+              <span class="tag t-yw">pendente</span>
+            </div>
+            <div class="wc-st">
+              <div class="ws"><div class="wsv">—</div><div class="wsl">limite/dia</div></div>
+              <div class="ws"><div class="wsv">—</div><div class="wsl">hoje</div></div>
+              <div class="ws"><div class="wsv">—</div><div class="wsl">este mês</div></div>
+            </div>
+          </div>
+          <div class="add-ch">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
+            <span>Conectar novo número</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DISPARADOR -->
+    <div class="screen" id="s-disp">
+      <div class="topbar">
+        <div class="tb-title">Disparador</div>
+        <div class="tb-acts"><button class="btn btn-pr">+ Nova campanha</button></div>
+      </div>
+      <div class="disp-l">
+        <div class="disp-m">
+          <div class="card" style="margin-bottom:14px">
+            <div class="ch"><span class="ct">Nova campanha</span></div>
+            <div style="padding:15px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div class="fg"><label>Nome da campanha</label><input placeholder="Ex: Leads maio 2026"></div>
+              <div class="fg"><label>Canal</label><select><option>+55 44 9748-9947 — Clara Instructiva</option></select></div>
+              <div class="fg"><label>Base de leads (.csv ou .xlsx)</label><input type="file" accept=".csv,.xlsx"></div>
+              <div class="fg"><label>Agendamento</label><input type="datetime-local"></div>
+              <div class="fg" style="grid-column:1/-1"><label>Mensagem de abertura</label><textarea placeholder="Oi {nome}! Aqui é a Clara da Escola Instructiva..."></textarea></div>
+            </div>
+            <div style="padding:0 15px 15px"><button class="btn btn-pr">Disparar campanha</button></div>
+          </div>
+          <div style="font-size:11px;font-weight:600;color:var(--t3);margin-bottom:9px;text-transform:uppercase;letter-spacing:.5px">Campanhas recentes</div>
+          <div class="camp">
+            <div class="camp-ic" style="background:rgba(22,163,74,.1)"><svg width="13" height="13" viewBox="0 0 16 16" fill="#22C55E"><path d="M2 8l12-6-4 6 4 6z"/></svg></div>
+            <div class="camp-inf"><div class="camp-nm">Leads Abril — Inversores Solares</div><div class="camp-mt">320 leads · 68% taxa resposta · 23 abr 2026</div></div>
+            <div class="pw"><div class="pw-lbl">Concluída</div><div class="pt"><div class="pf" style="width:100%"></div></div></div>
+            <span class="tag t-gr">concluída</span>
+          </div>
+          <div class="camp">
+            <div class="camp-ic" style="background:rgba(232,97,10,.1)"><svg width="13" height="13" viewBox="0 0 16 16" fill="var(--or)"><path d="M2 8l12-6-4 6 4 6z"/></svg></div>
+            <div class="camp-inf"><div class="camp-nm">Recuperação Carrinhos — Fontes Chaveadas</div><div class="camp-mt">85 leads · em andamento · hoje</div></div>
+            <div class="pw"><div class="pw-lbl" style="color:var(--or)">62%</div><div class="pt"><div class="pf" style="width:62%"></div></div></div>
+            <span class="tag t-or">ativa</span>
+          </div>
+        </div>
+        <div class="disp-sd">
+          <div class="dss"><div class="dss-t">Disparos este mês</div><div class="dss-n">4</div><div class="dss-l">campanhas realizadas</div></div>
+          <div class="dss"><div class="dss-t">Total de leads</div><div class="dss-n">1.4k</div><div class="dss-l">mensagens enviadas</div></div>
+          <div class="dss"><div class="dss-t">Taxa média resposta</div><div class="dss-n">63%</div><div class="dss-l">responderam</div></div>
+          <div class="dss"><div class="dss-t">Boletos pendentes</div><div class="dss-n">12</div><div class="dss-l">aguardando pagamento</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CONFIG -->
+    <div class="screen" id="s-cfg">
+      <div class="topbar"><div class="tb-title">Configurações</div></div>
+      <div class="cfg-l">
+        <div class="cfg-nav">
+          <div class="cni active" onclick="cfgN(this)"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 10a2 2 0 100-4 2 2 0 000 4zM8 1l1.2 2h2.5l.8 2-2 2 1 2.3-1.7 1.7-2.3-.8-2.3.8-1.7-1.7 1-2.3-2-2 .8-2h2.5z"/></svg>Geral</div>
+          <div class="cni" onclick="cfgN(this)"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M1 2h14a1 1 0 011 1v9a1 1 0 01-1 1H4l-3 2V3a1 1 0 011-1z"/></svg>Comportamento da IA</div>
+          <div class="cni" onclick="cfgN(this)"><svg viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="3"/><path d="M8 1a7 7 0 100 14" opacity=".4"/></svg>Integrações</div>
+          <div class="cni" onclick="cfgN(this)"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 4h12v8a1 1 0 01-1 1H3a1 1 0 01-1-1V4zm0 0l6-2 6 2"/></svg>Prompt da Clara</div>
+          <div class="cni" onclick="cfgN(this)"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a5 5 0 100 10A5 5 0 008 1zM8 3a3 3 0 110 6A3 3 0 018 3zM5 13h6l1 2H4z"/></svg>Notificações</div>
+        </div>
+        <div class="cfg-cnt">
+          <div class="cfg-sc">
+            <div class="cfg-sh">Comportamento da Clara</div>
+            <div class="cfg-rw"><div><div class="cfg-rl">Resposta automática</div><div class="cfg-rd">Clara responde automaticamente todos os leads recebidos</div></div><div class="tg on" onclick="this.classList.toggle('on');this.classList.toggle('off')"></div></div>
+            <div class="cfg-rw"><div><div class="cfg-rl">Recuperação de carrinho</div><div class="cfg-rd">Disparar ao detectar abandono na Hotmart</div></div><div class="tg on" onclick="this.classList.toggle('on');this.classList.toggle('off')"></div></div>
+            <div class="cfg-rw"><div><div class="cfg-rl">Boleto não pago</div><div class="cfg-rd">Notificar lead após 24h sem pagamento</div></div><div class="tg on" onclick="this.classList.toggle('on');this.classList.toggle('off')"></div></div>
+            <div class="cfg-rw"><div><div class="cfg-rl">Transferência para humano</div><div class="cfg-rd">Pausar Clara quando lead solicitar atendente</div></div><div class="tg on" onclick="this.classList.toggle('on');this.classList.toggle('off')"></div></div>
+          </div>
+          <div class="cfg-sc">
+            <div class="cfg-sh">Integrações</div>
+            <div class="cfg-rw"><div><div class="cfg-rl">Hotmart Webhook</div><div class="cfg-rd">Receber eventos de compra, abandono e cancelamento</div></div><button class="btn btn-sec">Configurar</button></div>
+            <div class="cfg-rw"><div><div class="cfg-rl">Google Gemini API</div><div class="cfg-rd">Chave configurada e ativa</div></div><span class="tag t-gr">ativo</span></div>
+            <div class="cfg-rw"><div><div class="cfg-rl">WhatsApp Business API</div><div class="cfg-rd">Token e Phone Number ID configurados</div></div><span class="tag t-gr">ativo</span></div>
+          </div>
+          <div class="cfg-sc">
+            <div class="cfg-sh">Prompt da Clara</div>
+            <div style="padding:13px 15px">
+              <div style="font-size:11px;color:var(--t3);margin-bottom:9px">Instruções que definem o comportamento da Clara em cada conversa</div>
+              <textarea style="width:100%;background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:10px;color:var(--t2);font-size:12px;outline:none;font-family:'Inter',sans-serif;min-height:110px;resize:vertical;line-height:1.6">Você é a Clara, consultora de vendas da Escola Instructiva. Escola técnica em eletrônica fundada pelo Prof. Celso Muniz — 38 anos de experiência, mais de 31 mil alunos em mais de 10 países. Seu objetivo é converter leads em alunos matriculados.</textarea>
+              <button class="btn btn-pr" style="margin-top:10px">Salvar alterações</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+function go(s,el){
+  document.querySelectorAll('.screen').forEach(e=>e.classList.remove('show'));
+  document.querySelectorAll('.ni').forEach(e=>e.classList.remove('active'));
+  document.getElementById('s-'+s).classList.add('show');
+  if(el)el.classList.add('active');
+}
+function selC(el,nm,nu,in_,cl,st,stc,cu,dt,or_){
+  document.querySelectorAll('.ci').forEach(e=>e.classList.remove('sel'));
+  el.classList.add('sel');
+  document.getElementById('c-nm').textContent=nm;
+  document.getElementById('c-nu').textContent=nu;
+  document.getElementById('ip-nm').textContent=nm;
+  document.getElementById('ip-tl').textContent=nu;
+  document.getElementById('ip-dt').textContent=dt;
+  document.getElementById('ip-or').textContent=or_;
+  document.getElementById('ip-cu').textContent=cu;
+  var av=document.getElementById('c-av');
+  av.textContent=in_;av.className='av '+cl;
+  var s=document.getElementById('c-st');
+  s.textContent=st;s.className='tag '+stc;
+  document.getElementById('ip-st').innerHTML='<span class="tag '+stc+'">'+st+'</span>';
+}
+function sm(){
+  var i=document.getElementById('mi'),v=i.value.trim();
+  if(!v)return;
+  var m=document.getElementById('msgs');
+  var now=new Date(),t=now.getHours()+':'+String(now.getMinutes()).padStart(2,'0');
+  var d=document.createElement('div');
+  d.className='msg m-out';
+  d.innerHTML='<div class="mw">Você</div><div class="mb">'+v+'</div><div class="mt">'+t+'</div>';
+  m.appendChild(d);m.scrollTop=m.scrollHeight;i.value='';
+}
+function cfgN(el){
+  document.querySelectorAll('.cni').forEach(e=>e.classList.remove('active'));
+  el.classList.add('active');
+}
+</script>
+</body>
+</html>
