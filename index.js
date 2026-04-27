@@ -46,16 +46,26 @@ REGRAS:
 - Tom: próximo, confiante e empático`;
 
 async function sendWhatsAppMessage(to, message) {
-  await axios.post(
-    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body: message }
-    },
-    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-  );
+  const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
+  try {
+    await axios.post(
+      url,
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'text',
+        text: { body: message }
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+    console.log(`Mensagem enviada para ${to}`);
+  } catch (err) {
+    console.error('Erro ao enviar mensagem WhatsApp:');
+    console.error('Status:', err.response?.status);
+    console.error('Data:', JSON.stringify(err.response?.data));
+    console.error('URL tentada:', url);
+    throw err;
+  }
 }
 
 async function getOrCreateLead(phone) {
@@ -151,6 +161,8 @@ app.post('/webhook', async (req, res) => {
     const from = message.from;
     const text = message.text?.body || '';
     if (!text) return;
+
+    console.log(`Mensagem recebida de ${from}: ${text}`);
 
     const lead = await getOrCreateLead(from);
     const conversa = await getOrCreateConversa(lead.id);
