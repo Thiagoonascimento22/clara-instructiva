@@ -60,10 +60,8 @@ async function sendWhatsAppMessage(to, message) {
     );
     console.log(`Mensagem enviada para ${to}`);
   } catch (err) {
-    console.error('Erro ao enviar mensagem WhatsApp:');
-    console.error('Status:', err.response?.status);
-    console.error('Data:', JSON.stringify(err.response?.data));
-    console.error('URL tentada:', url);
+    console.error('Erro WhatsApp - Status:', err.response?.status);
+    console.error('Erro WhatsApp - Data:', JSON.stringify(err.response?.data));
     throw err;
   }
 }
@@ -135,11 +133,18 @@ async function askClara(userMessage, historico = []) {
     + (historicoTexto ? `\n\nHISTÓRICO DA CONVERSA:\n${historicoTexto}` : '')
     + `\n\nMensagem atual do lead: ${userMessage}`;
 
-  const response = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-    { contents: [{ parts: [{ text: prompt }] }] }
-  );
-  return response.data.candidates[0].content.parts[0].text;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+  try {
+    const response = await axios.post(
+      url,
+      { contents: [{ parts: [{ text: prompt }] }] }
+    );
+    return response.data.candidates[0].content.parts[0].text;
+  } catch (err) {
+    console.error('Erro Gemini - Status:', err.response?.status);
+    console.error('Erro Gemini - Data:', JSON.stringify(err.response?.data));
+    throw err;
+  }
 }
 
 app.get('/webhook', (req, res) => {
