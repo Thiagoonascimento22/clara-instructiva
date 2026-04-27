@@ -133,7 +133,7 @@ async function askClara(userMessage, historico = []) {
     + (historicoTexto ? `\n\nHISTÓRICO DA CONVERSA:\n${historicoTexto}` : '')
     + `\n\nMensagem atual do lead: ${userMessage}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
   try {
     const response = await axios.post(
       url,
