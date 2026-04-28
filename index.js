@@ -4,9 +4,9 @@ const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
-// CORS manual — permite o CRM (Vercel) chamar este backend
+// CORS manual
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -26,49 +26,21 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-const SYSTEM_PROMPT = `Você é a Clara, consultora de vendas da Escola Instructiva, uma escola técnica em eletrônica do Brasil fundada pelo Prof. Celso Muniz — 38 anos de experiência, ex-professor do SENAI, ex-assistência técnica de Philips, Toshiba, LG, Samsung, Sony. Já impactou mais de 31 mil alunos em mais de 10 países.
+const SYSTEM_PROMPT_FALLBACK = `Você é a Clara, consultora de vendas da Escola Instructiva, escola técnica em eletrônica fundada pelo Prof. Celso Muniz. Tom amigável e direto. Mensagens curtas, máx 3 parágrafos. Máx 2 emojis. Não invente preços.`;
 
-NOSSOS CURSOS:
-- Especialista em Reparo de Placas Eletrônicas 3.0 (995 aulas | 200h)
-- Especialista em Manutenção de Inversores Solares 2.0 (715 aulas | 150h)
-- Especialista em Manutenção de Televisores LED e LCD 2.0 (618 aulas | 130h)
-- Especialista em Manutenção de Fontes Chaveadas 2.0 (659 aulas | 140h)
-- Especialista em Eletrônica de Potência + 3 Livros (972 aulas | 194h)
-- Especialista em Manutenção de Amplificadores de Áudio 2.0 (843 aulas | 168h)
-- Especialista em Manutenção de Equipamentos Inverter 2.0 (585 aulas | 117h)
-- Eletrônica para Iniciante (343 aulas | 68h)
-- E muito mais em: www.escolainstructiva.com.br
-
-DIFERENCIAIS:
-- Certificado em todos os cursos
-- Aulas gravadas + ao vivo mensais
-- Suporte por WhatsApp e comunidade
-- Acesso pelo celular, tablet ou PC
-- Parcelamento em até 12x no cartão
-- 7 dias de garantia sem burocracia
-
-REGRAS:
-- Use o nome do lead sempre que souber
-- Mensagens curtas, máximo 3 parágrafos
-- No máximo 2 emojis por mensagem
-- Se pedirem humano, diga que vai transferir
-- Nunca invente preços, direcione para o site
-- Tom: próximo, confiante e empático`;
-
+// ════════════════════════════════════════════════════════════════
+// HELPERS WHATSAPP
+// ════════════════════════════════════════════════════════════════
 async function sendWhatsAppMessage(to, message) {
   const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
   try {
-    await axios.post(
+    const r = await axios.post(
       url,
-      {
-        messaging_product: 'whatsapp',
-        to,
-        type: 'text',
-        text: { body: message }
-      },
+      { messaging_product: 'whatsapp', to, type: 'text', text: { body: message } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
     );
     console.log(`Mensagem enviada para ${to}`);
+    return r.data;
   } catch (err) {
     console.error('Erro WhatsApp - Status:', err.response?.status);
     console.error('Erro WhatsApp - Data:', JSON.stringify(err.response?.data));
@@ -76,19 +48,46 @@ async function sendWhatsAppMessage(to, message) {
   }
 }
 
-async function getOrCreateLead(phone) {
-  let { data: lead } = await supabase
-    .from('leads')
-    .select('*')
-    .eq('phone', phone)
-    .single();
+async function sendWhatsAppTemplate(to, templateName, language, variables = []) {
+  const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
+  const body = {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: language || 'pt_BR' }
+    }
+  };
+  if (variables && variables.length > 0) {
+    body.template.components = [{
+      type: 'body',
+      parameters: variables.map(v => ({ type: 'text', text: String(v) }))
+    }];
+  }
+  try {
+    const r = await axios.post(url, body, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+    });
+    return { ok: true, message_id: r.data.messages?.[0]?.id };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err.response?.data?.error?.message || err.message,
+      details: err.response?.data
+    };
+  }
+}
 
+// ════════════════════════════════════════════════════════════════
+// HELPERS LEADS / CONVERSAS / MENSAGENS
+// ════════════════════════════════════════════════════════════════
+async function getOrCreateLead(phone, name = null) {
+  let { data: lead } = await supabase.from('leads').select('*').eq('phone', phone).single();
   if (!lead) {
-    const { data: newLead } = await supabase
-      .from('leads')
-      .insert({ phone })
-      .select()
-      .single();
+    const insertData = { phone };
+    if (name) insertData.name = name;
+    const { data: newLead } = await supabase.from('leads').insert(insertData).select().single();
     lead = newLead;
   }
   return lead;
@@ -103,25 +102,19 @@ async function getOrCreateConversa(leadId) {
     .order('created_at', { ascending: false })
     .limit(1)
     .single();
-
   if (!conversa) {
-    const { data: novaConversa } = await supabase
+    const { data: nova } = await supabase
       .from('conversas')
       .insert({ lead_id: leadId, channel: 'whatsapp', status: 'aberta' })
       .select()
       .single();
-    conversa = novaConversa;
+    conversa = nova;
   }
   return conversa;
 }
 
 async function salvarMensagem(conversaId, leadId, role, content) {
-  await supabase.from('mensagens').insert({
-    conversa_id: conversaId,
-    lead_id: leadId,
-    role,
-    content
-  });
+  await supabase.from('mensagens').insert({ conversa_id: conversaId, lead_id: leadId, role, content });
 }
 
 async function buscarHistorico(conversaId, limite = 10) {
@@ -134,31 +127,56 @@ async function buscarHistorico(conversaId, limite = 10) {
   return (data || []).reverse();
 }
 
-async function askClara(userMessage, historico = []) {
-  const historicoTexto = historico
-    .map(m => `${m.role === 'user' ? 'Lead' : 'Clara'}: ${m.content}`)
-    .join('\n');
+// ════════════════════════════════════════════════════════════════
+// AGENTES — busca o agente certo pra responder
+// ════════════════════════════════════════════════════════════════
+async function buscarAgenteAtivo(leadId) {
+  // 1. Primeiro tenta achar campanha ativa que esse lead foi alvo
+  const { data: envio } = await supabase
+    .from('campanha_envios')
+    .select('campanha_id, campanhas(agente_id)')
+    .eq('lead_id', leadId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
 
-  const prompt = SYSTEM_PROMPT
-    + (historicoTexto ? `\n\nHISTÓRICO DA CONVERSA:\n${historicoTexto}` : '')
+  if (envio?.campanhas?.agente_id) {
+    const { data: agente } = await supabase
+      .from('agentes')
+      .select('*')
+      .eq('id', envio.campanhas.agente_id)
+      .single();
+    if (agente) return agente;
+  }
+
+  // 2. Se não achou pela campanha, pega o agente padrão (is_default=true)
+  const { data: padrao } = await supabase
+    .from('agentes')
+    .select('*')
+    .eq('is_default', true)
+    .eq('ativo', true)
+    .limit(1)
+    .single();
+
+  return padrao || null;
+}
+
+async function askClara(userMessage, historico = [], agente = null) {
+  const promptBase = agente?.system_prompt || SYSTEM_PROMPT_FALLBACK;
+  const baseConhecimento = agente?.base_conhecimento ? `\n\nBASE DE CONHECIMENTO:\n${agente.base_conhecimento}` : '';
+  const historicoTexto = historico.map(m => `${m.role === 'user' ? 'Lead' : 'Clara'}: ${m.content}`).join('\n');
+  const prompt = promptBase
+    + baseConhecimento
+    + (historicoTexto ? `\n\nHISTÓRICO:\n${historicoTexto}` : '')
     + `\n\nMensagem atual do lead: ${userMessage}`;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
-  try {
-    const response = await axios.post(
-      url,
-      { contents: [{ parts: [{ text: prompt }] }] }
-    );
-    return response.data.candidates[0].content.parts[0].text;
-  } catch (err) {
-    console.error('Erro Gemini - Status:', err.response?.status);
-    console.error('Erro Gemini - Data:', JSON.stringify(err.response?.data));
-    throw err;
-  }
+  const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }] });
+  return r.data.candidates[0].content.parts[0].text;
 }
 
 // ════════════════════════════════════════════════════════════════
-// WEBHOOKS WHATSAPP (não mexer)
+// WEBHOOKS WHATSAPP
 // ════════════════════════════════════════════════════════════════
 app.get('/webhook', (req, res) => {
   if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
@@ -173,29 +191,59 @@ app.post('/webhook', async (req, res) => {
   try {
     const entry = req.body.entry?.[0];
     const changes = entry?.changes?.[0];
-    const message = changes?.value?.messages?.[0];
+    const value = changes?.value;
+
+    // Atualizar status de envios (entregue, lido)
+    if (value?.statuses?.length) {
+      for (const st of value.statuses) {
+        const msgId = st.id;
+        const status = st.status; // sent, delivered, read, failed
+        const updateData = {};
+        if (status === 'delivered') { updateData.status = 'entregue'; updateData.entregue_em = new Date(); }
+        else if (status === 'read') { updateData.status = 'lido'; }
+        else if (status === 'failed') { updateData.status = 'erro'; updateData.erro_mensagem = JSON.stringify(st.errors); }
+
+        if (Object.keys(updateData).length) {
+          await supabase.from('campanha_envios').update(updateData).eq('whatsapp_message_id', msgId);
+        }
+      }
+    }
+
+    const message = value?.messages?.[0];
     if (!message) return;
 
     const from = message.from;
     const text = message.text?.body || '';
+    const profileName = value?.contacts?.[0]?.profile?.name || null;
     if (!text) return;
 
-    console.log(`Mensagem recebida de ${from}: ${text}`);
+    console.log(`Mensagem recebida de ${from} (${profileName}): ${text}`);
 
-    const lead = await getOrCreateLead(from);
+    const lead = await getOrCreateLead(from, profileName);
     const conversa = await getOrCreateConversa(lead.id);
+
+    // Marcar resposta de campanha (se houver)
+    await supabase
+      .from('campanha_envios')
+      .update({ status: 'respondido', respondido_em: new Date() })
+      .eq('lead_id', lead.id)
+      .in('status', ['enviado', 'entregue', 'lido']);
+
     const historico = await buscarHistorico(conversa.id);
+    const agente = await buscarAgenteAtivo(lead.id);
 
     await salvarMensagem(conversa.id, lead.id, 'user', text);
-    const reply = await askClara(text, historico);
+    const reply = await askClara(text, historico, agente);
     await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
     await sendWhatsAppMessage(from, reply);
-
   } catch (err) {
     console.error('Erro webhook:', err.message);
   }
 });
 
+// ════════════════════════════════════════════════════════════════
+// HOTMART
+// ════════════════════════════════════════════════════════════════
 app.post('/hotmart', async (req, res) => {
   res.sendStatus(200);
   try {
@@ -206,13 +254,9 @@ app.post('/hotmart', async (req, res) => {
     const product = data?.product?.name || 'nosso curso';
 
     let message = '';
-    if (event === 'PURCHASE_ABANDONED') {
-      message = `Oi ${name}! 😊 Vi que você se interessou pelo ${product}. Posso te ajudar com alguma dúvida ou condição especial?`;
-    } else if (event === 'PURCHASE_CANCELED') {
-      message = `Oi ${name}, tudo bem? Vi que sua matrícula no ${product} não foi concluída. Posso ajudar! 🎓`;
-    } else if (event === 'PURCHASE_BILLET_PRINTED') {
-      message = `Oi ${name}! Seu boleto do ${product} está aguardando. Temos 7 dias de garantia — sem risco! 😊`;
-    }
+    if (event === 'PURCHASE_ABANDONED') message = `Oi ${name}! 😊 Vi que você se interessou pelo ${product}. Posso te ajudar?`;
+    else if (event === 'PURCHASE_CANCELED') message = `Oi ${name}, sua matrícula no ${product} não foi concluída. Posso ajudar! 🎓`;
+    else if (event === 'PURCHASE_BILLET_PRINTED') message = `Oi ${name}! Seu boleto do ${product} aguarda pagamento. 7 dias de garantia! 😊`;
 
     if (message && phone) {
       const lead = await getOrCreateLead(phone);
@@ -226,73 +270,39 @@ app.post('/hotmart', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-// API DE TEMPLATES META (NOVO!)
+// API DE TEMPLATES META
 // ════════════════════════════════════════════════════════════════
-
-// Listar templates da Meta
 app.get('/api/templates', async (req, res) => {
   try {
-    if (!WABA_ID) return res.status(500).json({ error: 'WABA_ID não configurado' });
+    if (!WABA_ID) return res.status(500).json({ ok: false, error: 'WABA_ID não configurado' });
     const url = `https://graph.facebook.com/v22.0/${WABA_ID}/message_templates?limit=100&fields=name,status,category,language,components,quality_score`;
-    const response = await axios.get(url, {
-      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
-    });
-    res.json({ ok: true, data: response.data.data || [] });
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    res.json({ ok: true, data: r.data.data || [] });
   } catch (err) {
-    console.error('Erro listar templates:', err.response?.data || err.message);
     res.status(500).json({ ok: false, error: err.response?.data?.error?.message || err.message });
   }
 });
 
-// Criar template novo
 app.post('/api/templates', async (req, res) => {
   try {
-    if (!WABA_ID) return res.status(500).json({ error: 'WABA_ID não configurado' });
-
+    if (!WABA_ID) return res.status(500).json({ ok: false, error: 'WABA_ID não configurado' });
     const { name, category, language, body, footer, header } = req.body;
+    if (!name || !category || !language || !body) return res.status(400).json({ ok: false, error: 'Campos obrigatórios: name, category, language, body' });
 
-    if (!name || !category || !language || !body) {
-      return res.status(400).json({ ok: false, error: 'Campos obrigatórios: name, category, language, body' });
-    }
-
-    // Construir components conforme padrão Meta
     const components = [];
-
-    if (header && header.trim()) {
-      components.push({
-        type: 'HEADER',
-        format: 'TEXT',
-        text: header.trim()
-      });
-    }
-
-    components.push({
-      type: 'BODY',
-      text: body.trim()
-    });
-
-    if (footer && footer.trim()) {
-      components.push({
-        type: 'FOOTER',
-        text: footer.trim()
-      });
-    }
+    if (header && header.trim()) components.push({ type: 'HEADER', format: 'TEXT', text: header.trim() });
+    components.push({ type: 'BODY', text: body.trim() });
+    if (footer && footer.trim()) components.push({ type: 'FOOTER', text: footer.trim() });
 
     const url = `https://graph.facebook.com/v22.0/${WABA_ID}/message_templates`;
-    const response = await axios.post(
-      url,
-      {
-        name: name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
-        category: category.toUpperCase(),
-        language,
-        components
-      },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
-
-    res.json({ ok: true, data: response.data });
+    const r = await axios.post(url, {
+      name: name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+      category: category.toUpperCase(),
+      language,
+      components
+    }, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    res.json({ ok: true, data: r.data });
   } catch (err) {
-    console.error('Erro criar template:', err.response?.data || err.message);
     res.status(500).json({
       ok: false,
       error: err.response?.data?.error?.message || err.message,
@@ -301,29 +311,127 @@ app.post('/api/templates', async (req, res) => {
   }
 });
 
-// Apagar template
 app.delete('/api/templates/:name', async (req, res) => {
   try {
-    if (!WABA_ID) return res.status(500).json({ error: 'WABA_ID não configurado' });
-
-    const name = req.params.name;
-    const url = `https://graph.facebook.com/v22.0/${WABA_ID}/message_templates?name=${encodeURIComponent(name)}`;
-
-    const response = await axios.delete(url, {
-      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
-    });
-
-    res.json({ ok: true, data: response.data });
+    if (!WABA_ID) return res.status(500).json({ ok: false, error: 'WABA_ID não configurado' });
+    const url = `https://graph.facebook.com/v22.0/${WABA_ID}/message_templates?name=${encodeURIComponent(req.params.name)}`;
+    const r = await axios.delete(url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    res.json({ ok: true, data: r.data });
   } catch (err) {
-    console.error('Erro deletar template:', err.response?.data || err.message);
     res.status(500).json({ ok: false, error: err.response?.data?.error?.message || err.message });
   }
 });
 
 // ════════════════════════════════════════════════════════════════
+// API BUSINESS / WABA INFO
+// ════════════════════════════════════════════════════════════════
+app.get('/api/waba-info', async (req, res) => {
+  try {
+    if (!WABA_ID) return res.status(500).json({ ok: false, error: 'WABA_ID não configurado' });
+    const url = `https://graph.facebook.com/v22.0/${WABA_ID}?fields=id,name,currency,timezone_id,message_template_namespace,owner_business_info`;
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    res.json({ ok: true, data: r.data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.response?.data?.error?.message || err.message });
+  }
+});
+
+app.get('/api/phone-numbers', async (req, res) => {
+  try {
+    if (!WABA_ID) return res.status(500).json({ ok: false, error: 'WABA_ID não configurado' });
+    const url = `https://graph.facebook.com/v22.0/${WABA_ID}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating,code_verification_status,messaging_limit_tier,name_status`;
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    res.json({ ok: true, data: r.data.data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.response?.data?.error?.message || err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// API DE DISPARO DE CAMPANHA
+// ════════════════════════════════════════════════════════════════
+app.post('/api/campanhas/:id/disparar', async (req, res) => {
+  const campanhaId = req.params.id;
+  res.json({ ok: true, message: 'Disparo iniciado em segundo plano' });
+
+  // Disparo em segundo plano (não bloqueia resposta)
+  setImmediate(async () => {
+    try {
+      const { data: campanha } = await supabase.from('campanhas').select('*').eq('id', campanhaId).single();
+      if (!campanha) return console.error('Campanha não encontrada');
+
+      await supabase.from('campanhas').update({ status: 'disparando', iniciada_em: new Date() }).eq('id', campanhaId);
+
+      const { data: envios } = await supabase
+        .from('campanha_envios')
+        .select('*')
+        .eq('campanha_id', campanhaId)
+        .eq('status', 'pendente');
+
+      console.log(`Disparando campanha ${campanha.nome} para ${envios?.length || 0} leads`);
+
+      let sucessos = 0, erros = 0;
+
+      for (const envio of (envios || [])) {
+        try {
+          // Garantir que o lead existe
+          const lead = await getOrCreateLead(envio.phone, envio.nome);
+
+          // Enviar template
+          const r = await sendWhatsAppTemplate(
+            envio.phone,
+            campanha.template_name,
+            campanha.template_language,
+            envio.variaveis || []
+          );
+
+          if (r.ok) {
+            await supabase.from('campanha_envios').update({
+              status: 'enviado',
+              whatsapp_message_id: r.message_id,
+              enviado_em: new Date(),
+              lead_id: lead.id
+            }).eq('id', envio.id);
+            sucessos++;
+          } else {
+            await supabase.from('campanha_envios').update({
+              status: 'erro',
+              erro_mensagem: r.error
+            }).eq('id', envio.id);
+            erros++;
+          }
+
+          // Delay entre envios (respeita rate limit Meta: ~80/seg, mas vamos bem mais devagar pra qualidade)
+          await new Promise(r => setTimeout(r, 1500));
+
+        } catch (e) {
+          console.error('Erro envio individual:', e.message);
+          await supabase.from('campanha_envios').update({
+            status: 'erro',
+            erro_mensagem: e.message
+          }).eq('id', envio.id);
+          erros++;
+        }
+      }
+
+      await supabase.from('campanhas').update({
+        status: 'concluida',
+        concluida_em: new Date(),
+        enviados: sucessos
+      }).eq('id', campanhaId);
+
+      console.log(`Campanha ${campanha.nome} concluída: ${sucessos} enviados, ${erros} erros`);
+    } catch (err) {
+      console.error('Erro disparo campanha:', err.message);
+      await supabase.from('campanhas').update({ status: 'erro' }).eq('id', campanhaId);
+    }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
 // HEALTH CHECK
 // ════════════════════════════════════════════════════════════════
-app.get('/', (req, res) => res.send('Clara da Escola Instructiva está online! 🤖'));
+app.get('/', (req, res) => res.send('Clara da Escola Instructiva está online! 🤖 v3'));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Clara rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Clara v3 rodando na porta ${PORT}`));
