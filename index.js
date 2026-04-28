@@ -132,7 +132,7 @@ async function getOrCreateConversa(leadId) {
 }
 
 async function salvarMensagem(conversaId, leadId, role, content) {
-  await supabase.from('mensagens').insert({ conversa_id: conversaId, lead_id: leadId, role, content });
+  await supabase.from('mensagens').insert({ conversa_id: conversaId, lead_id: leadId, role, content }); await supabase.from('conversas').update({ updated_at: new Date() }).eq('id', conversaId);
 }
 
 async function buscarHistorico(conversaId, limite = 10) {
