@@ -1,15 +1,18 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(express.json());
+app.use(cors());
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const GEMINI_API_KEY = process.env.CLAUDE_API_KEY;
+const WABA_ID = process.env.WABA_ID;
 
 const supabase = createClient(
   process.env.URL_SUPABASE,
@@ -147,6 +150,9 @@ async function askClara(userMessage, historico = []) {
   }
 }
 
+// ════════════════════════════════════════════════════════════════
+// WEBHOOKS WHATSAPP (não mexer)
+// ════════════════════════════════════════════════════════════════
 app.get('/webhook', (req, res) => {
   if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
     res.send(req.query['hub.challenge']);
@@ -212,6 +218,104 @@ app.post('/hotmart', async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════════
+// API DE TEMPLATES META (NOVO!)
+// ════════════════════════════════════════════════════════════════
+
+// Listar templates da Meta
+app.get('/api/templates', async (req, res) => {
+  try {
+    if (!WABA_ID) return res.status(500).json({ error: 'WABA_ID não configurado' });
+    const url = `https://graph.facebook.com/v22.0/${WABA_ID}/message_templates?limit=100&fields=name,status,category,language,components,quality_score`;
+    const response = await axios.get(url, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+    });
+    res.json({ ok: true, data: response.data.data || [] });
+  } catch (err) {
+    console.error('Erro listar templates:', err.response?.data || err.message);
+    res.status(500).json({ ok: false, error: err.response?.data?.error?.message || err.message });
+  }
+});
+
+// Criar template novo
+app.post('/api/templates', async (req, res) => {
+  try {
+    if (!WABA_ID) return res.status(500).json({ error: 'WABA_ID não configurado' });
+
+    const { name, category, language, body, footer, header } = req.body;
+
+    if (!name || !category || !language || !body) {
+      return res.status(400).json({ ok: false, error: 'Campos obrigatórios: name, category, language, body' });
+    }
+
+    // Construir components conforme padrão Meta
+    const components = [];
+
+    if (header && header.trim()) {
+      components.push({
+        type: 'HEADER',
+        format: 'TEXT',
+        text: header.trim()
+      });
+    }
+
+    components.push({
+      type: 'BODY',
+      text: body.trim()
+    });
+
+    if (footer && footer.trim()) {
+      components.push({
+        type: 'FOOTER',
+        text: footer.trim()
+      });
+    }
+
+    const url = `https://graph.facebook.com/v22.0/${WABA_ID}/message_templates`;
+    const response = await axios.post(
+      url,
+      {
+        name: name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+        category: category.toUpperCase(),
+        language,
+        components
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+
+    res.json({ ok: true, data: response.data });
+  } catch (err) {
+    console.error('Erro criar template:', err.response?.data || err.message);
+    res.status(500).json({
+      ok: false,
+      error: err.response?.data?.error?.message || err.message,
+      details: err.response?.data?.error?.error_user_msg || null
+    });
+  }
+});
+
+// Apagar template
+app.delete('/api/templates/:name', async (req, res) => {
+  try {
+    if (!WABA_ID) return res.status(500).json({ error: 'WABA_ID não configurado' });
+
+    const name = req.params.name;
+    const url = `https://graph.facebook.com/v22.0/${WABA_ID}/message_templates?name=${encodeURIComponent(name)}`;
+
+    const response = await axios.delete(url, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+    });
+
+    res.json({ ok: true, data: response.data });
+  } catch (err) {
+    console.error('Erro deletar template:', err.response?.data || err.message);
+    res.status(500).json({ ok: false, error: err.response?.data?.error?.message || err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// HEALTH CHECK
+// ════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.send('Clara da Escola Instructiva está online! 🤖'));
 
 const PORT = process.env.PORT || 3000;
