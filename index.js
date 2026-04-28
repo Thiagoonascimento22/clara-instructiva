@@ -59,6 +59,7 @@ async function sendWhatsAppTemplate(to, templateName, language, variables = []) 
       language: { code: language || 'pt_BR' }
     }
   };
+  // Só adiciona componente body se tiver variáveis pra passar
   if (variables && variables.length > 0) {
     body.template.components = [{
       type: 'body',
@@ -76,6 +77,23 @@ async function sendWhatsAppTemplate(to, templateName, language, variables = []) 
       error: err.response?.data?.error?.message || err.message,
       details: err.response?.data
     };
+  }
+}
+
+// Helper: descobre quantas variáveis o template tem (consulta a Meta)
+async function getTemplateVariableCount(templateName) {
+  if (!WABA_ID) return 0;
+  try {
+    const url = `https://graph.facebook.com/v22.0/${WABA_ID}/message_templates?fields=name,components&limit=200`;
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    const tpl = (r.data.data || []).find(t => t.name === templateName);
+    if (!tpl) return 0;
+    const body = (tpl.components || []).find(c => c.type === 'BODY')?.text || '';
+    const matches = body.match(/\{\{\d+\}\}/g) || [];
+    return new Set(matches).size; // variáveis únicas
+  } catch (err) {
+    console.error('Erro ao buscar variáveis do template:', err.message);
+    return 0;
   }
 }
 
@@ -362,6 +380,10 @@ app.post('/api/campanhas/:id/disparar', async (req, res) => {
 
       await supabase.from('campanhas').update({ status: 'disparando', iniciada_em: new Date() }).eq('id', campanhaId);
 
+      // Descobrir quantas variáveis o template tem
+      const varCount = await getTemplateVariableCount(campanha.template_name);
+      console.log(`Template ${campanha.template_name} tem ${varCount} variável(eis)`);
+
       const { data: envios } = await supabase
         .from('campanha_envios')
         .select('*')
@@ -377,12 +399,23 @@ app.post('/api/campanhas/:id/disparar', async (req, res) => {
           // Garantir que o lead existe
           const lead = await getOrCreateLead(envio.phone, envio.nome);
 
+          // Preparar variáveis: pegar só a quantidade que o template precisa
+          let varsToSend = [];
+          if (varCount > 0) {
+            const allVars = envio.variaveis || [];
+            varsToSend = allVars.slice(0, varCount);
+            // Se faltar variáveis, preenche com nome ou "amigo"
+            while (varsToSend.length < varCount) {
+              varsToSend.push(envio.nome || 'amigo');
+            }
+          }
+
           // Enviar template
           const r = await sendWhatsAppTemplate(
             envio.phone,
             campanha.template_name,
             campanha.template_language,
-            envio.variaveis || []
+            varsToSend
           );
 
           if (r.ok) {
