@@ -241,7 +241,62 @@ async function askClara(userMessage, historico = [], agente = null) {
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
   const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }] });
-  return r.data.candidates[0].content.parts[0].text;
+  const reply = r.data.candidates[0].content.parts[0].text;
+
+  // Extrair contagem de tokens da resposta da API
+  const usage = r.data.usageMetadata || {};
+  const inputTokens = usage.promptTokenCount || 0;
+  const outputTokens = usage.candidatesTokenCount || 0;
+
+  // Salvar gasto Gemini em background (não bloqueia resposta)
+  salvarGastoGemini(inputTokens, outputTokens).catch(e => 
+    console.error('Erro ao salvar gasto Gemini:', e.message)
+  );
+
+  return reply;
+}
+
+// Calcula custo Gemini Flash e soma ao gasto do dia
+// Preços (Gemini 2.5 Flash, abr/2026):
+//   Input:  $0.075 por 1M tokens
+//   Output: $0.30 por 1M tokens
+async function salvarGastoGemini(inputTokens, outputTokens) {
+  if (!inputTokens && !outputTokens) return;
+
+  const PRECO_INPUT_USD = 0.075 / 1_000_000;
+  const PRECO_OUTPUT_USD = 0.30 / 1_000_000;
+  const custoUSD = (inputTokens * PRECO_INPUT_USD) + (outputTokens * PRECO_OUTPUT_USD);
+  if (custoUSD <= 0) return;
+
+  const cotacao = await getCotacaoUSDBRL();
+  const custoBRL = custoUSD * cotacao;
+  const hoje = new Date().toISOString().slice(0, 10);
+  const categoria = 'Tokens IA';
+
+  // Verifica se já tem gasto Gemini de hoje
+  const { data: existing } = await supabase
+    .from('gastos')
+    .select('id, valor')
+    .eq('data', hoje)
+    .eq('categoria', categoria)
+    .eq('source', 'gemini_auto')
+    .limit(1);
+
+  if (existing && existing.length > 0) {
+    // Soma ao gasto existente
+    const novoValor = parseFloat(existing[0].valor) + custoBRL;
+    await supabase.from('gastos').update({ valor: novoValor }).eq('id', existing[0].id);
+  } else {
+    // Cria novo gasto do dia
+    await supabase.from('gastos').insert({
+      valor: custoBRL,
+      descricao: `Gemini Flash - ${hoje}`,
+      data: hoje,
+      canal: 'gemini',
+      categoria,
+      source: 'gemini_auto'
+    });
+  }
 }
 
 // ════════════════════════════════════════════════════════════════
