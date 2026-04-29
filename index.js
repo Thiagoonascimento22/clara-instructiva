@@ -618,4 +618,228 @@ app.post('/api/conversas/:id/enviar', async (req, res) => {
 app.get('/', (req, res) => res.send('Clara da Escola Instructiva está online! 🤖 v3'));
 
 const PORT = process.env.PORT || 3000;
+// ════════════════════════════════════════════════════════════════
+// META BUSINESS API — Sincronização de gastos do WhatsApp
+// ════════════════════════════════════════════════════════════════
+
+// Pega cotação USD->BRL atual via AwesomeAPI (gratuita, dados oficiais)
+async function getCotacaoUSDBRL() {
+  try {
+    const r = await axios.get('https://economia.awesomeapi.com.br/json/last/USD-BRL', { timeout: 10000 });
+    const cotacao = parseFloat(r.data?.USDBRL?.bid);
+    if (cotacao && cotacao > 0) return cotacao;
+  } catch (e) {
+    console.error('Erro ao buscar cotação:', e.message);
+  }
+  return 5.50; // fallback se a API falhar
+}
+
+// Sincronizar gastos da Meta WhatsApp Business
+async function sincronizarGastosMeta() {
+  console.log('🔄 Iniciando sincronização Meta...');
+  
+  if (!WHATSAPP_TOKEN || !WABA_ID) {
+    console.error('Faltam credenciais Meta (WHATSAPP_TOKEN ou WABA_ID)');
+    return { success: false, error: 'Credenciais Meta não configuradas' };
+  }
+
+  // Período: últimos 30 dias
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(start.getDate() - 30);
+  const startTs = Math.floor(start.getTime() / 1000);
+  const endTs = Math.floor(now.getTime() / 1000);
+
+  const cotacao = await getCotacaoUSDBRL();
+  console.log(`💱 Cotação USD->BRL: R$ ${cotacao.toFixed(2)}`);
+
+  try {
+    // Endpoint: pricing analytics agregado por dia e categoria
+    const url = `https://graph.facebook.com/v21.0/${WABA_ID}/pricing_analytics`;
+    const params = {
+      start: startTs,
+      end: endTs,
+      granularity: 'DAILY',
+      access_token: WHATSAPP_TOKEN
+    };
+
+    const response = await axios.get(url, { params, timeout: 30000 });
+    const data = response.data?.data?.[0]?.data_points || [];
+
+    if (!data.length) {
+      console.log('Nenhum dado de pricing analytics retornado');
+      // Tenta endpoint alternativo: conversation_analytics
+      return await sincronizarConversationAnalytics(startTs, endTs, cotacao);
+    }
+
+    let totalInserido = 0, totalAtualizado = 0;
+
+    for (const point of data) {
+      // Cada point: { start, end, cost, currency, pricing_type, ... }
+      const dataDia = new Date((point.start || 0) * 1000).toISOString().slice(0, 10);
+      const custoUSD = parseFloat(point.cost || 0);
+      if (custoUSD <= 0) continue;
+      const custoBRL = custoUSD * cotacao;
+      const tipo = point.pricing_type || point.pricing_category || 'WhatsApp';
+      const categoria = 'Meta WhatsApp';
+      const descricao = `${tipo} - ${dataDia}`;
+
+      // Upsert: se já existe um gasto Meta API pra esse dia/categoria, atualiza
+      const { data: existing } = await supabase
+        .from('gastos')
+        .select('id')
+        .eq('data', dataDia)
+        .eq('categoria', categoria)
+        .eq('source', 'meta_api')
+        .limit(1);
+
+      if (existing && existing.length > 0) {
+        await supabase.from('gastos').update({
+          valor: custoBRL,
+          descricao,
+          canal: 'whatsapp'
+        }).eq('id', existing[0].id);
+        totalAtualizado++;
+      } else {
+        await supabase.from('gastos').insert({
+          valor: custoBRL,
+          descricao,
+          data: dataDia,
+          canal: 'whatsapp',
+          categoria,
+          source: 'meta_api'
+        });
+        totalInserido++;
+      }
+    }
+
+    console.log(`✅ Meta sincronizado: ${totalInserido} novos, ${totalAtualizado} atualizados`);
+    return { success: true, inserted: totalInserido, updated: totalAtualizado, cotacao };
+
+  } catch (err) {
+    console.error('Erro Meta API:', err.response?.data || err.message);
+    return { success: false, error: err.response?.data?.error?.message || err.message };
+  }
+}
+
+// Endpoint alternativo se pricing_analytics não retornar dados
+async function sincronizarConversationAnalytics(startTs, endTs, cotacao) {
+  try {
+    const url = `https://graph.facebook.com/v21.0/${WABA_ID}`;
+    const params = {
+      fields: `conversation_analytics.start(${startTs}).end(${endTs}).granularity(DAILY).phone_numbers([])`,
+      access_token: WHATSAPP_TOKEN
+    };
+
+    const response = await axios.get(url, { params, timeout: 30000 });
+    const points = response.data?.conversation_analytics?.data?.[0]?.data_points || [];
+
+    if (!points.length) {
+      return { success: true, inserted: 0, updated: 0, message: 'Sem dados disponíveis no período' };
+    }
+
+    let totalInserido = 0, totalAtualizado = 0;
+
+    for (const point of points) {
+      const dataDia = new Date((point.start || 0) * 1000).toISOString().slice(0, 10);
+      const custoUSD = parseFloat(point.cost || 0);
+      if (custoUSD <= 0) continue;
+      const custoBRL = custoUSD * cotacao;
+      const categoria = 'Meta WhatsApp';
+      const descricao = `Conversas - ${dataDia}`;
+
+      const { data: existing } = await supabase
+        .from('gastos')
+        .select('id')
+        .eq('data', dataDia)
+        .eq('categoria', categoria)
+        .eq('source', 'meta_api')
+        .limit(1);
+
+      if (existing && existing.length > 0) {
+        await supabase.from('gastos').update({ valor: custoBRL, descricao, canal: 'whatsapp' }).eq('id', existing[0].id);
+        totalAtualizado++;
+      } else {
+        await supabase.from('gastos').insert({ valor: custoBRL, descricao, data: dataDia, canal: 'whatsapp', categoria, source: 'meta_api' });
+        totalInserido++;
+      }
+    }
+
+    return { success: true, inserted: totalInserido, updated: totalAtualizado, cotacao };
+  } catch (err) {
+    return { success: false, error: err.response?.data?.error?.message || err.message };
+  }
+}
+
+// Gerar gastos recorrentes do mês (ex: Railway $5/mês todo dia 1)
+async function gerarGastosRecorrentes() {
+  console.log('🔄 Gerando gastos recorrentes...');
+  const hoje = new Date();
+  const diaHoje = hoje.getDate();
+  const mesAno = hoje.toISOString().slice(0, 7); // 2026-04
+
+  const { data: recorrentes } = await supabase
+    .from('gastos')
+    .select('*')
+    .eq('recorrente', true);
+
+  if (!recorrentes || !recorrentes.length) return { generated: 0 };
+
+  let geradosCount = 0;
+  for (const r of recorrentes) {
+    const diaRec = r.recorrencia_dia || 1;
+    if (diaHoje !== diaRec) continue;
+
+    // Verifica se já gerou esse mês
+    const dataEsperada = `${mesAno}-${String(diaRec).padStart(2, '0')}`;
+    const { data: existe } = await supabase
+      .from('gastos')
+      .select('id')
+      .eq('data', dataEsperada)
+      .eq('descricao', r.descricao)
+      .eq('source', 'recorrente')
+      .limit(1);
+
+    if (existe && existe.length > 0) continue;
+
+    await supabase.from('gastos').insert({
+      valor: r.valor,
+      descricao: r.descricao,
+      data: dataEsperada,
+      canal: r.canal,
+      categoria: r.categoria || 'Outros',
+      source: 'recorrente'
+    });
+    geradosCount++;
+  }
+  console.log(`✅ ${geradosCount} gastos recorrentes gerados`);
+  return { generated: geradosCount };
+}
+
+// Rota: sincronizar manualmente
+app.post('/api/sincronizar-gastos-meta', async (req, res) => {
+  const result = await sincronizarGastosMeta();
+  res.json(result);
+});
+
+// Rota: gerar recorrentes manualmente
+app.post('/api/gerar-recorrentes', async (req, res) => {
+  const result = await gerarGastosRecorrentes();
+  res.json(result);
+});
+
+// Cron diário às 03:00 — sincroniza Meta + gera recorrentes
+function iniciarCronDiario() {
+  setInterval(async () => {
+    const agora = new Date();
+    if (agora.getHours() === 3 && agora.getMinutes() === 0) {
+      console.log('⏰ Cron diário 03:00 disparado');
+      await sincronizarGastosMeta();
+      await gerarGastosRecorrentes();
+    }
+  }, 60 * 1000); // checa a cada minuto
+  console.log('⏰ Cron diário ativo (03:00)');
+}
+iniciarCronDiario();
+
 app.listen(PORT, () => console.log(`Clara v3 rodando na porta ${PORT}`));
