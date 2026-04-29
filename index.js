@@ -143,23 +143,27 @@ async function getOrCreateLead(phone, name = null) {
 }
 
 async function getOrCreateConversa(leadId) {
-  let { data: conversa } = await supabase
+  // Busca conversa aberta e não arquivada (sem .single() pra não falhar quando tem múltiplas)
+  const { data: conversas } = await supabase
     .from('conversas')
     .select('*')
     .eq('lead_id', leadId)
     .eq('status', 'aberta')
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .single();
-  if (!conversa) {
-    const { data: nova } = await supabase
-      .from('conversas')
-      .insert({ lead_id: leadId, channel: 'whatsapp', status: 'aberta' })
-      .select()
-      .single();
-    conversa = nova;
+    .eq('arquivada', false)
+    .order('updated_at', { ascending: false })
+    .limit(1);
+
+  if (conversas && conversas.length > 0) {
+    return conversas[0];
   }
-  return conversa;
+
+  // Nenhuma conversa aberta — cria nova
+  const { data: nova } = await supabase
+    .from('conversas')
+    .insert({ lead_id: leadId, channel: 'whatsapp', status: 'aberta', arquivada: false })
+    .select()
+    .single();
+  return nova;
 }
 
 async function salvarMensagem(conversaId, leadId, role, content) {
