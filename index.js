@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const multer = require('multer');
+const FormData = require('form-data');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -20,11 +22,23 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const GEMINI_API_KEY = process.env.CLAUDE_API_KEY;
 const WABA_ID = process.env.WABA_ID;
+const META_APP_ID = process.env.META_APP_ID;
 
 const supabase = createClient(
   process.env.URL_SUPABASE,
   process.env.SUPABASE_SERVICE_KEY
 );
+
+// Multer pra upload de foto de perfil (memória, max 5MB, só JPG/PNG)
+const uploadProfilePic = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/jpg', 'image/png'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Apenas JPG ou PNG'));
+  }
+});
 
 const SYSTEM_PROMPT_FALLBACK = `Você é a Clara, consultora de vendas da Escola Instructiva, escola técnica em eletrônica fundada pelo Prof. Celso Muniz. Tom amigável e direto. Mensagens curtas, máx 3 parágrafos. Máx 2 emojis. Não invente preços.`;
 
@@ -476,6 +490,82 @@ app.get('/api/phone-numbers', async (req, res) => {
     res.json({ ok: true, data: r.data.data || [] });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.response?.data?.error?.message || err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// FOTO DE PERFIL DO WHATSAPP BUSINESS
+// ════════════════════════════════════════════════════════════════
+
+// GET — Buscar perfil atual (foto, sobre, descrição)
+app.get('/api/whatsapp/profile', async (req, res) => {
+  try {
+    if (!PHONE_NUMBER_ID) return res.status(500).json({ ok: false, error: 'PHONE_NUMBER_ID não configurado' });
+    const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`;
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    res.json({ ok: true, data: r.data?.data?.[0] || {} });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.response?.data?.error?.message || err.message });
+  }
+});
+
+// POST — Atualizar foto de perfil (Resumable Upload em 3 etapas)
+app.post('/api/whatsapp/profile-picture', uploadProfilePic.single('image'), async (req, res) => {
+  try {
+    if (!PHONE_NUMBER_ID) return res.status(500).json({ ok: false, error: 'PHONE_NUMBER_ID não configurado' });
+    if (!META_APP_ID) return res.status(500).json({ ok: false, error: 'META_APP_ID não configurado no Railway' });
+    if (!req.file) return res.status(400).json({ ok: false, error: 'Nenhuma imagem enviada' });
+
+    const fileSize = req.file.size;
+    const fileType = req.file.mimetype;
+    const fileBuffer = req.file.buffer;
+
+    console.log(`📷 Upload foto: ${(fileSize / 1024).toFixed(1)}KB, tipo ${fileType}`);
+
+    // ETAPA 1: Criar sessão de upload
+    const sessionUrl = `https://graph.facebook.com/v22.0/${META_APP_ID}/uploads?file_length=${fileSize}&file_type=${encodeURIComponent(fileType)}&access_token=${WHATSAPP_TOKEN}`;
+    const sessionRes = await axios.post(sessionUrl);
+    const uploadSessionId = sessionRes.data.id; // formato: "upload:XXXXX"
+
+    if (!uploadSessionId) throw new Error('Falha ao criar sessão de upload');
+    console.log(`✓ Sessão criada: ${uploadSessionId}`);
+
+    // ETAPA 2: Fazer upload do arquivo binário
+    const uploadRes = await axios.post(
+      `https://graph.facebook.com/v22.0/${uploadSessionId}`,
+      fileBuffer,
+      {
+        headers: {
+          'Authorization': `OAuth ${WHATSAPP_TOKEN}`,
+          'file_offset': 0,
+          'Content-Type': fileType
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      }
+    );
+
+    const fileHandle = uploadRes.data.h;
+    if (!fileHandle) throw new Error('Falha ao receber handle do arquivo');
+    console.log(`✓ Upload concluído, handle recebido`);
+
+    // ETAPA 3: Atualizar perfil do WhatsApp Business com o handle
+    const profileUrl = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/whatsapp_business_profile`;
+    await axios.post(
+      profileUrl,
+      {
+        messaging_product: 'whatsapp',
+        profile_picture_handle: fileHandle
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+
+    console.log(`✅ Foto de perfil atualizada com sucesso!`);
+    res.json({ ok: true, message: 'Foto atualizada' });
+  } catch (err) {
+    console.error('Erro ao atualizar foto:', err.response?.data || err.message);
+    const msg = err.response?.data?.error?.message || err.message;
+    res.status(500).json({ ok: false, error: msg });
   }
 });
 
