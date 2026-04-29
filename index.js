@@ -100,13 +100,44 @@ async function getTemplateVariableCount(templateName) {
 // ════════════════════════════════════════════════════════════════
 // HELPERS LEADS / CONVERSAS / MENSAGENS
 // ════════════════════════════════════════════════════════════════
+// Normaliza telefone BR pra formato único: 55 + DDD + 9 + número (13 dígitos)
+// Aceita várias entradas e retorna sempre o mesmo formato pra mesma pessoa
+function normalizePhone(phone) {
+  if (!phone) return phone;
+  // Tira +, traços, parênteses, espaços, pontos
+  let p = String(phone).replace(/\D/g, '');
+  // Se começou sem 55 (DDI Brasil), adiciona
+  if (p.length === 10 || p.length === 11) p = '55' + p;
+  // Agora deve ter 12 ou 13 dígitos: 55 + DDD(2) + número(8 ou 9)
+  // Se tem 12 dígitos (sem o 9 do celular), adiciona o 9
+  if (p.length === 12) {
+    // Formato: 55 + DDD(2) + 8 dígitos → adiciona 9 entre DDD e número
+    const ddi = p.slice(0, 2);
+    const ddd = p.slice(2, 4);
+    const num = p.slice(4);
+    p = ddi + ddd + '9' + num;
+  }
+  return p;
+}
+
 async function getOrCreateLead(phone, name = null) {
-  let { data: lead } = await supabase.from('leads').select('*').eq('phone', phone).single();
+  const normalizedPhone = normalizePhone(phone);
+  let { data: lead } = await supabase.from('leads').select('*').eq('phone', normalizedPhone).single();
   if (!lead) {
-    const insertData = { phone };
+    const insertData = { phone: normalizedPhone };
     if (name) insertData.name = name;
     const { data: newLead } = await supabase.from('leads').insert(insertData).select().single();
     lead = newLead;
+  } else if (name && !lead.name) {
+    // Lead já existe mas sem nome - atualiza com o profile name do WhatsApp
+    const { data: updated } = await supabase
+      .from('leads')
+      .update({ name })
+      .eq('id', lead.id)
+      .select()
+      .single();
+    if (updated) lead = updated;
+    console.log(`Nome do lead ${normalizedPhone} atualizado: ${name}`);
   }
   return lead;
 }
