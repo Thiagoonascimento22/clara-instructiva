@@ -115,17 +115,11 @@ async function getTemplateVariableCount(templateName) {
 // HELPERS LEADS / CONVERSAS / MENSAGENS
 // ════════════════════════════════════════════════════════════════
 // Normaliza telefone BR pra formato único: 55 + DDD + 9 + número (13 dígitos)
-// Aceita várias entradas e retorna sempre o mesmo formato pra mesma pessoa
 function normalizePhone(phone) {
   if (!phone) return phone;
-  // Tira +, traços, parênteses, espaços, pontos
   let p = String(phone).replace(/\D/g, '');
-  // Se começou sem 55 (DDI Brasil), adiciona
   if (p.length === 10 || p.length === 11) p = '55' + p;
-  // Agora deve ter 12 ou 13 dígitos: 55 + DDD(2) + número(8 ou 9)
-  // Se tem 12 dígitos (sem o 9 do celular), adiciona o 9
   if (p.length === 12) {
-    // Formato: 55 + DDD(2) + 8 dígitos → adiciona 9 entre DDD e número
     const ddi = p.slice(0, 2);
     const ddd = p.slice(2, 4);
     const num = p.slice(4);
@@ -142,8 +136,8 @@ async function getOrCreateLead(phone, name = null) {
     if (name) insertData.name = name;
     const { data: newLead } = await supabase.from('leads').insert(insertData).select().single();
     lead = newLead;
-  } else if (name && !lead.name) {
-    // Lead já existe mas sem nome - atualiza com o profile name do WhatsApp
+  } else if (name && (!lead.name || /^Lead \d+$/.test(lead.name))) {
+    // Lead já existe mas sem nome OU com nome fake "Lead X" — atualiza com profile name real do WhatsApp
     const { data: updated } = await supabase
       .from('leads')
       .update({ name })
@@ -157,7 +151,6 @@ async function getOrCreateLead(phone, name = null) {
 }
 
 async function getOrCreateConversa(leadId) {
-  // Busca conversa aberta e não arquivada (sem .single() pra não falhar quando tem múltiplas)
   const { data: conversas } = await supabase
     .from('conversas')
     .select('*')
@@ -171,7 +164,6 @@ async function getOrCreateConversa(leadId) {
     return conversas[0];
   }
 
-  // Nenhuma conversa aberta — cria nova
   const { data: nova } = await supabase
     .from('conversas')
     .insert({ lead_id: leadId, channel: 'whatsapp', status: 'aberta', arquivada: false })
@@ -198,7 +190,6 @@ async function buscarHistorico(conversaId, limite = 10) {
 // AGENTES — busca o agente certo pra responder
 // ════════════════════════════════════════════════════════════════
 async function buscarAgenteAtivo(conversaId) {
-  // 1. Pega a campanha vinculada à CONVERSA (foi setada no disparo)
   const { data: conversa } = await supabase
     .from('conversas')
     .select('campanha_id, campanhas(agente_id)')
@@ -214,7 +205,6 @@ async function buscarAgenteAtivo(conversaId) {
     if (agente) return agente;
   }
 
-  // 2. Fallback: agente padrão (is_default=true)
   const { data: padrao } = await supabase
     .from('agentes')
     .select('*')
@@ -226,8 +216,6 @@ async function buscarAgenteAtivo(conversaId) {
   return padrao || null;
 }
 
-// Decide se a campanha NOVA do disparo deve sobrescrever a campanha atual da conversa
-// Regra: sobrescreve se a conversa estiver "fria" (sem resposta da Clara nos últimos 7 dias)
 async function deveSobrescreverCampanha(conversaId) {
   const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
   const { data: ultimaResposta } = await supabase
@@ -239,7 +227,7 @@ async function deveSobrescreverCampanha(conversaId) {
     .limit(1)
     .single();
 
-  if (!ultimaResposta) return true; // nunca respondeu → fria
+  if (!ultimaResposta) return true;
   const idade = Date.now() - new Date(ultimaResposta.created_at).getTime();
   return idade > SEVEN_DAYS_MS;
 }
@@ -257,12 +245,10 @@ async function askClara(userMessage, historico = [], agente = null) {
   const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }] });
   const reply = r.data.candidates[0].content.parts[0].text;
 
-  // Extrair contagem de tokens da resposta da API
   const usage = r.data.usageMetadata || {};
   const inputTokens = usage.promptTokenCount || 0;
   const outputTokens = usage.candidatesTokenCount || 0;
 
-  // Salvar gasto Gemini em background (não bloqueia resposta)
   salvarGastoGemini(inputTokens, outputTokens).catch(e => 
     console.error('Erro ao salvar gasto Gemini:', e.message)
   );
@@ -270,10 +256,6 @@ async function askClara(userMessage, historico = [], agente = null) {
   return reply;
 }
 
-// Calcula custo Gemini Flash e soma ao gasto do dia
-// Preços (Gemini 2.5 Flash, abr/2026):
-//   Input:  $0.075 por 1M tokens
-//   Output: $0.30 por 1M tokens
 async function salvarGastoGemini(inputTokens, outputTokens) {
   if (!inputTokens && !outputTokens) return;
 
@@ -287,7 +269,6 @@ async function salvarGastoGemini(inputTokens, outputTokens) {
   const hoje = new Date().toISOString().slice(0, 10);
   const categoria = 'Tokens IA';
 
-  // Verifica se já tem gasto Gemini de hoje
   const { data: existing } = await supabase
     .from('gastos')
     .select('id, valor')
@@ -297,11 +278,9 @@ async function salvarGastoGemini(inputTokens, outputTokens) {
     .limit(1);
 
   if (existing && existing.length > 0) {
-    // Soma ao gasto existente
     const novoValor = parseFloat(existing[0].valor) + custoBRL;
     await supabase.from('gastos').update({ valor: novoValor }).eq('id', existing[0].id);
   } else {
-    // Cria novo gasto do dia
     await supabase.from('gastos').insert({
       valor: custoBRL,
       descricao: `Gemini Flash - ${hoje}`,
@@ -331,11 +310,10 @@ app.post('/webhook', async (req, res) => {
     const changes = entry?.changes?.[0];
     const value = changes?.value;
 
-    // Atualizar status de envios (entregue, lido)
     if (value?.statuses?.length) {
       for (const st of value.statuses) {
         const msgId = st.id;
-        const status = st.status; // sent, delivered, read, failed
+        const status = st.status;
         const updateData = {};
         if (status === 'delivered') { updateData.status = 'entregue'; updateData.entregue_em = new Date(); }
         else if (status === 'read') { updateData.status = 'lido'; }
@@ -360,17 +338,14 @@ app.post('/webhook', async (req, res) => {
     const lead = await getOrCreateLead(from, profileName);
     const conversa = await getOrCreateConversa(lead.id);
 
-    // Marcar resposta de campanha (se houver)
     await supabase
       .from('campanha_envios')
       .update({ status: 'respondido', respondido_em: new Date() })
       .eq('lead_id', lead.id)
       .in('status', ['enviado', 'entregue', 'lido']);
 
-    // Salvar mensagem do lead SEMPRE (mesmo que Clara esteja pausada)
     await salvarMensagem(conversa.id, lead.id, 'user', text);
 
-    // Se Clara está pausada nesta conversa, não responde (humano assumiu)
     if (conversa.ia_active === false) {
       console.log(`Clara pausada na conversa ${conversa.id} — humano assumiu, não respondendo`);
       return;
@@ -496,8 +471,6 @@ app.get('/api/phone-numbers', async (req, res) => {
 // ════════════════════════════════════════════════════════════════
 // FOTO DE PERFIL DO WHATSAPP BUSINESS
 // ════════════════════════════════════════════════════════════════
-
-// GET — Buscar perfil atual (foto, sobre, descrição)
 app.get('/api/whatsapp/profile', async (req, res) => {
   try {
     if (!PHONE_NUMBER_ID) return res.status(500).json({ ok: false, error: 'PHONE_NUMBER_ID não configurado' });
@@ -509,7 +482,6 @@ app.get('/api/whatsapp/profile', async (req, res) => {
   }
 });
 
-// POST — Atualizar foto de perfil (Resumable Upload em 3 etapas)
 app.post('/api/whatsapp/profile-picture', uploadProfilePic.single('image'), async (req, res) => {
   try {
     if (!PHONE_NUMBER_ID) return res.status(500).json({ ok: false, error: 'PHONE_NUMBER_ID não configurado' });
@@ -522,15 +494,13 @@ app.post('/api/whatsapp/profile-picture', uploadProfilePic.single('image'), asyn
 
     console.log(`📷 Upload foto: ${(fileSize / 1024).toFixed(1)}KB, tipo ${fileType}`);
 
-    // ETAPA 1: Criar sessão de upload
     const sessionUrl = `https://graph.facebook.com/v22.0/${META_APP_ID}/uploads?file_length=${fileSize}&file_type=${encodeURIComponent(fileType)}&access_token=${WHATSAPP_TOKEN}`;
     const sessionRes = await axios.post(sessionUrl);
-    const uploadSessionId = sessionRes.data.id; // formato: "upload:XXXXX"
+    const uploadSessionId = sessionRes.data.id;
 
     if (!uploadSessionId) throw new Error('Falha ao criar sessão de upload');
     console.log(`✓ Sessão criada: ${uploadSessionId}`);
 
-    // ETAPA 2: Fazer upload do arquivo binário
     const uploadRes = await axios.post(
       `https://graph.facebook.com/v22.0/${uploadSessionId}`,
       fileBuffer,
@@ -549,7 +519,6 @@ app.post('/api/whatsapp/profile-picture', uploadProfilePic.single('image'), asyn
     if (!fileHandle) throw new Error('Falha ao receber handle do arquivo');
     console.log(`✓ Upload concluído, handle recebido`);
 
-    // ETAPA 3: Atualizar perfil do WhatsApp Business com o handle
     const profileUrl = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/whatsapp_business_profile`;
     await axios.post(
       profileUrl,
@@ -576,7 +545,6 @@ app.post('/api/campanhas/:id/disparar', async (req, res) => {
   const campanhaId = req.params.id;
   res.json({ ok: true, message: 'Disparo iniciado em segundo plano' });
 
-  // Disparo em segundo plano (não bloqueia resposta)
   setImmediate(async () => {
     try {
       const { data: campanha } = await supabase.from('campanhas').select('*').eq('id', campanhaId).single();
@@ -584,7 +552,6 @@ app.post('/api/campanhas/:id/disparar', async (req, res) => {
 
       await supabase.from('campanhas').update({ status: 'disparando', iniciada_em: new Date() }).eq('id', campanhaId);
 
-      // Descobrir quantas variáveis o template tem
       const varCount = await getTemplateVariableCount(campanha.template_name);
       console.log(`Template ${campanha.template_name} tem ${varCount} variável(eis)`);
 
@@ -600,10 +567,8 @@ app.post('/api/campanhas/:id/disparar', async (req, res) => {
 
       for (const envio of (envios || [])) {
         try {
-          // Garantir que o lead existe
           const lead = await getOrCreateLead(envio.phone, envio.nome);
 
-          // Garantir que existe conversa aberta + decidir vinculação à campanha
           const conversa = await getOrCreateConversa(lead.id);
           const podeSobrescrever = await deveSobrescreverCampanha(conversa.id);
           if (!conversa.campanha_id || podeSobrescrever) {
@@ -616,18 +581,15 @@ app.post('/api/campanhas/:id/disparar', async (req, res) => {
             console.log(`Conversa ${conversa.id} mantida na campanha anterior (ativa)`);
           }
 
-          // Preparar variáveis: pegar só a quantidade que o template precisa
           let varsToSend = [];
           if (varCount > 0) {
             const allVars = envio.variaveis || [];
             varsToSend = allVars.slice(0, varCount);
-            // Se faltar variáveis, preenche com nome ou "amigo"
             while (varsToSend.length < varCount) {
               varsToSend.push(envio.nome || 'amigo');
             }
           }
 
-          // Enviar template
           const r = await sendWhatsAppTemplate(
             envio.phone,
             campanha.template_name,
@@ -651,7 +613,6 @@ app.post('/api/campanhas/:id/disparar', async (req, res) => {
             erros++;
           }
 
-          // Delay entre envios (respeita rate limit Meta: ~80/seg, mas vamos bem mais devagar pra qualidade)
           await new Promise(r => setTimeout(r, 1500));
 
         } catch (e) {
@@ -679,10 +640,9 @@ app.post('/api/campanhas/:id/disparar', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-// API CONTROLE MANUAL DA CONVERSA (pausar/retomar Clara + envio manual)
+// API CONTROLE MANUAL DA CONVERSA (pausar/retomar Clara + envio manual + marcar lida)
 // ════════════════════════════════════════════════════════════════
 
-// Pausar a Clara em uma conversa específica (humano assume)
 app.post('/api/conversas/:id/pausar', async (req, res) => {
   try {
     const { error } = await supabase
@@ -698,7 +658,6 @@ app.post('/api/conversas/:id/pausar', async (req, res) => {
   }
 });
 
-// Retomar a Clara em uma conversa específica
 app.post('/api/conversas/:id/retomar', async (req, res) => {
   try {
     const { error } = await supabase
@@ -714,7 +673,6 @@ app.post('/api/conversas/:id/retomar', async (req, res) => {
   }
 });
 
-// Enviar mensagem manual em nome do humano (vai pro WhatsApp do lead)
 app.post('/api/conversas/:id/enviar', async (req, res) => {
   try {
     const { mensagem } = req.body;
@@ -722,7 +680,6 @@ app.post('/api/conversas/:id/enviar', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Mensagem vazia' });
     }
 
-    // Buscar conversa + telefone do lead
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
       .select('*, leads(phone)')
@@ -738,10 +695,8 @@ app.post('/api/conversas/:id/enviar', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Lead sem telefone' });
     }
 
-    // Mandar via WhatsApp (vai falhar se passou da janela de 24h da Meta)
     await sendWhatsAppMessage(phone, mensagem);
 
-    // Salvar no histórico da conversa
     await salvarMensagem(conversa.id, conversa.lead_id, 'assistant', mensagem);
 
     console.log(`Mensagem manual enviada para ${phone} na conversa ${conversa.id}`);
@@ -757,17 +712,31 @@ app.post('/api/conversas/:id/enviar', async (req, res) => {
   }
 });
 
+// ⭐ NOVA ROTA: marcar conversa como lida (atualiza last_read_at = now)
+app.post('/api/conversas/:id/marcar-lida', async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('conversas')
+      .update({ last_read_at: new Date() })
+      .eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Erro marcar lida:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ════════════════════════════════════════════════════════════════
 // HEALTH CHECK
 // ════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.send('Clara da Escola Instructiva está online! 🤖 v3'));
 
 const PORT = process.env.PORT || 3000;
+
 // ════════════════════════════════════════════════════════════════
 // META BUSINESS API — Sincronização de gastos do WhatsApp
 // ════════════════════════════════════════════════════════════════
-
-// Pega cotação USD->BRL atual via AwesomeAPI (gratuita, dados oficiais)
 async function getCotacaoUSDBRL() {
   try {
     const r = await axios.get('https://economia.awesomeapi.com.br/json/last/USD-BRL', { timeout: 10000 });
@@ -776,10 +745,9 @@ async function getCotacaoUSDBRL() {
   } catch (e) {
     console.error('Erro ao buscar cotação:', e.message);
   }
-  return 5.50; // fallback se a API falhar
+  return 5.50;
 }
 
-// Sincronizar gastos da Meta WhatsApp Business
 async function sincronizarGastosMeta() {
   console.log('🔄 Iniciando sincronização Meta...');
   
@@ -788,7 +756,6 @@ async function sincronizarGastosMeta() {
     return { success: false, error: 'Credenciais Meta não configuradas' };
   }
 
-  // Período: últimos 30 dias
   const now = new Date();
   const start = new Date(now);
   start.setDate(start.getDate() - 30);
@@ -799,7 +766,6 @@ async function sincronizarGastosMeta() {
   console.log(`💱 Cotação USD->BRL: R$ ${cotacao.toFixed(2)}`);
 
   try {
-    // Endpoint: pricing analytics agregado por dia e categoria
     const url = `https://graph.facebook.com/v21.0/${WABA_ID}/pricing_analytics`;
     const params = {
       start: startTs,
@@ -813,14 +779,12 @@ async function sincronizarGastosMeta() {
 
     if (!data.length) {
       console.log('Nenhum dado de pricing analytics retornado');
-      // Tenta endpoint alternativo: conversation_analytics
       return await sincronizarConversationAnalytics(startTs, endTs, cotacao);
     }
 
     let totalInserido = 0, totalAtualizado = 0;
 
     for (const point of data) {
-      // Cada point: { start, end, cost, currency, pricing_type, ... }
       const dataDia = new Date((point.start || 0) * 1000).toISOString().slice(0, 10);
       const custoUSD = parseFloat(point.cost || 0);
       if (custoUSD <= 0) continue;
@@ -829,7 +793,6 @@ async function sincronizarGastosMeta() {
       const categoria = 'Meta WhatsApp';
       const descricao = `${tipo} - ${dataDia}`;
 
-      // Upsert: se já existe um gasto Meta API pra esse dia/categoria, atualiza
       const { data: existing } = await supabase
         .from('gastos')
         .select('id')
@@ -867,7 +830,6 @@ async function sincronizarGastosMeta() {
   }
 }
 
-// Endpoint alternativo se pricing_analytics não retornar dados
 async function sincronizarConversationAnalytics(startTs, endTs, cotacao) {
   try {
     const url = `https://graph.facebook.com/v21.0/${WABA_ID}`;
@@ -916,12 +878,11 @@ async function sincronizarConversationAnalytics(startTs, endTs, cotacao) {
   }
 }
 
-// Gerar gastos recorrentes do mês (ex: Railway $5/mês todo dia 1)
 async function gerarGastosRecorrentes() {
   console.log('🔄 Gerando gastos recorrentes...');
   const hoje = new Date();
   const diaHoje = hoje.getDate();
-  const mesAno = hoje.toISOString().slice(0, 7); // 2026-04
+  const mesAno = hoje.toISOString().slice(0, 7);
 
   const { data: recorrentes } = await supabase
     .from('gastos')
@@ -935,7 +896,6 @@ async function gerarGastosRecorrentes() {
     const diaRec = r.recorrencia_dia || 1;
     if (diaHoje !== diaRec) continue;
 
-    // Verifica se já gerou esse mês
     const dataEsperada = `${mesAno}-${String(diaRec).padStart(2, '0')}`;
     const { data: existe } = await supabase
       .from('gastos')
@@ -961,19 +921,16 @@ async function gerarGastosRecorrentes() {
   return { generated: geradosCount };
 }
 
-// Rota: sincronizar manualmente
 app.post('/api/sincronizar-gastos-meta', async (req, res) => {
   const result = await sincronizarGastosMeta();
   res.json(result);
 });
 
-// Rota: gerar recorrentes manualmente
 app.post('/api/gerar-recorrentes', async (req, res) => {
   const result = await gerarGastosRecorrentes();
   res.json(result);
 });
 
-// Cron diário às 03:00 — sincroniza Meta + gera recorrentes
 function iniciarCronDiario() {
   setInterval(async () => {
     const agora = new Date();
@@ -982,7 +939,7 @@ function iniciarCronDiario() {
       await sincronizarGastosMeta();
       await gerarGastosRecorrentes();
     }
-  }, 60 * 1000); // checa a cada minuto
+  }, 60 * 1000);
   console.log('⏰ Cron diário ativo (03:00)');
 }
 iniciarCronDiario();
