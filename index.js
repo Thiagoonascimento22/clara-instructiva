@@ -247,10 +247,18 @@ app.post('/webhook', async (req, res) => {
       .eq('lead_id', lead.id)
       .in('status', ['enviado', 'entregue', 'lido']);
 
+    // Salvar mensagem do lead SEMPRE (mesmo que Clara esteja pausada)
+    await salvarMensagem(conversa.id, lead.id, 'user', text);
+
+    // Se Clara está pausada nesta conversa, não responde (humano assumiu)
+    if (conversa.ia_active === false) {
+      console.log(`Clara pausada na conversa ${conversa.id} — humano assumiu, não respondendo`);
+      return;
+    }
+
     const historico = await buscarHistorico(conversa.id);
     const agente = await buscarAgenteAtivo(lead.id);
 
-    await salvarMensagem(conversa.id, lead.id, 'user', text);
     const reply = await askClara(text, historico, agente);
     await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
     await sendWhatsAppMessage(from, reply);
@@ -459,6 +467,85 @@ app.post('/api/campanhas/:id/disparar', async (req, res) => {
       await supabase.from('campanhas').update({ status: 'erro' }).eq('id', campanhaId);
     }
   });
+});
+
+// ════════════════════════════════════════════════════════════════
+// API CONTROLE MANUAL DA CONVERSA (pausar/retomar Clara + envio manual)
+// ════════════════════════════════════════════════════════════════
+
+// Pausar a Clara em uma conversa específica (humano assume)
+app.post('/api/conversas/:id/pausar', async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('conversas')
+      .update({ ia_active: false, updated_at: new Date() })
+      .eq('id', req.params.id);
+    if (error) throw error;
+    console.log(`Conversa ${req.params.id} pausada (humano assumiu)`);
+    res.json({ ok: true, ia_active: false });
+  } catch (err) {
+    console.error('Erro pausar conversa:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Retomar a Clara em uma conversa específica
+app.post('/api/conversas/:id/retomar', async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('conversas')
+      .update({ ia_active: true, updated_at: new Date() })
+      .eq('id', req.params.id);
+    if (error) throw error;
+    console.log(`Conversa ${req.params.id} retomada (Clara voltou)`);
+    res.json({ ok: true, ia_active: true });
+  } catch (err) {
+    console.error('Erro retomar conversa:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Enviar mensagem manual em nome do humano (vai pro WhatsApp do lead)
+app.post('/api/conversas/:id/enviar', async (req, res) => {
+  try {
+    const { mensagem } = req.body;
+    if (!mensagem || !mensagem.trim()) {
+      return res.status(400).json({ ok: false, error: 'Mensagem vazia' });
+    }
+
+    // Buscar conversa + telefone do lead
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('*, leads(phone)')
+      .eq('id', req.params.id)
+      .single();
+
+    if (errConv || !conversa) {
+      return res.status(404).json({ ok: false, error: 'Conversa não encontrada' });
+    }
+
+    const phone = conversa.leads?.phone;
+    if (!phone) {
+      return res.status(400).json({ ok: false, error: 'Lead sem telefone' });
+    }
+
+    // Mandar via WhatsApp (vai falhar se passou da janela de 24h da Meta)
+    await sendWhatsAppMessage(phone, mensagem);
+
+    // Salvar no histórico da conversa
+    await salvarMensagem(conversa.id, conversa.lead_id, 'assistant', mensagem);
+
+    console.log(`Mensagem manual enviada para ${phone} na conversa ${conversa.id}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Erro envio manual:', err.message);
+    const metaError = err.response?.data?.error?.message;
+    res.status(500).json({
+      ok: false,
+      error: metaError || err.message,
+      hint: metaError ? 'Pode ser janela de 24h da Meta expirada' : null
+    });
+  }
 });
 
 // ════════════════════════════════════════════════════════════════
