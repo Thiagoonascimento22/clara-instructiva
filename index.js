@@ -308,7 +308,7 @@ app.post('/webhook', async (req, res) => {
   try {
     const entry = req.body.entry?.[0];
     const changes = entry?.changes?.[0];
-    const value = changes?.value;
+    const value = changes?.value;     const recebidoEm = value?.metadata?.phone_number_id;     if (recebidoEm && recebidoEm !== PHONE_NUMBER_ID) { console.log(`Ignorado: msg veio pro numero ${recebidoEm}`); return; }
 
     if (value?.statuses?.length) {
       for (const st of value.statuses) {
