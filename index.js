@@ -45,7 +45,7 @@ const SYSTEM_PROMPT_FALLBACK = `Você é a Clara, consultora de vendas da Escola
 // ════════════════════════════════════════════════════════════════
 // HELPERS WHATSAPP
 // ════════════════════════════════════════════════════════════════
-async function sendWhatsAppMessage(to, message) {
+async function sendTypingIndicator(messageId) {   const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;   try {     await axios.post(       url,       {         messaging_product: 'whatsapp',         status: 'read',         message_id: messageId,         typing_indicator: { type: 'text' }       },       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }     );     console.log(`✓ Typing indicator enviado pra mensagem ${messageId}`);   } catch (err) {     console.error('Erro typing indicator:', err.response?.data?.error?.message || err.message);   } }  function calcularTempoDigitando(texto) {   const len = (texto || '').length;   if (len <= 80) return 4000;   if (len <= 250) return 8000;   return 14000; }  async function sendWhatsAppMessage(to, message) {
   const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
   try {
     const r = await axios.post(
