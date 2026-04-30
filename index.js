@@ -354,7 +354,7 @@ app.post('/webhook', async (req, res) => {
     const historico = await buscarHistorico(conversa.id);
     const agente = await buscarAgenteAtivo(conversa.id);
 
-    const reply = await askClara(text, historico, agente);
+    await sendTypingIndicator(message.id);     const reply = await askClara(text, historico, agente);     const tempoEspera = calcularTempoDigitando(reply);     console.log(`Aguardando ${tempoEspera}ms antes de responder`);     await new Promise(r => setTimeout(r, tempoEspera));
     await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
     await sendWhatsAppMessage(from, reply);
   } catch (err) {
