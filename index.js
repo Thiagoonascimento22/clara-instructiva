@@ -45,7 +45,33 @@ const SYSTEM_PROMPT_FALLBACK = `Você é a Clara, consultora de vendas da Escola
 // ════════════════════════════════════════════════════════════════
 // HELPERS WHATSAPP
 // ════════════════════════════════════════════════════════════════
-async function sendTypingIndicator(messageId) {   const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;   try {     await axios.post(       url,       {         messaging_product: 'whatsapp',         status: 'read',         message_id: messageId,         typing_indicator: { type: 'text' }       },       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }     );     console.log(`✓ Typing indicator enviado pra mensagem ${messageId}`);   } catch (err) {     console.error('Erro typing indicator:', err.response?.data?.error?.message || err.message);   } }  function calcularTempoDigitando(texto) {   const len = (texto || '').length;   if (len <= 80) return 4000;   if (len <= 250) return 8000;   return 14000; }  async function sendWhatsAppMessage(to, message) {
+async function sendTypingIndicator(messageId) {
+  const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
+  try {
+    await axios.post(
+      url,
+      {
+        messaging_product: 'whatsapp',
+        status: 'read',
+        message_id: messageId,
+        typing_indicator: { type: 'text' }
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+    console.log(`✓ Typing indicator enviado pra mensagem ${messageId}`);
+  } catch (err) {
+    console.error('Erro typing indicator:', err.response?.data?.error?.message || err.message);
+  }
+}
+
+function calcularTempoDigitando(texto) {
+  const len = (texto || '').length;
+  if (len <= 80) return 4000;
+  if (len <= 250) return 8000;
+  return 14000;
+}
+
+async function sendWhatsAppMessage(to, message) {
   const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
   try {
     const r = await axios.post(
@@ -73,7 +99,6 @@ async function sendWhatsAppTemplate(to, templateName, language, variables = []) 
       language: { code: language || 'pt_BR' }
     }
   };
-  // Só adiciona componente body se tiver variáveis pra passar
   if (variables && variables.length > 0) {
     body.template.components = [{
       type: 'body',
@@ -94,7 +119,6 @@ async function sendWhatsAppTemplate(to, templateName, language, variables = []) 
   }
 }
 
-// Helper: descobre quantas variáveis o template tem (consulta a Meta)
 async function getTemplateVariableCount(templateName) {
   if (!WABA_ID) return 0;
   try {
@@ -104,7 +128,7 @@ async function getTemplateVariableCount(templateName) {
     if (!tpl) return 0;
     const body = (tpl.components || []).find(c => c.type === 'BODY')?.text || '';
     const matches = body.match(/\{\{\d+\}\}/g) || [];
-    return new Set(matches).size; // variáveis únicas
+    return new Set(matches).size;
   } catch (err) {
     console.error('Erro ao buscar variáveis do template:', err.message);
     return 0;
@@ -114,7 +138,6 @@ async function getTemplateVariableCount(templateName) {
 // ════════════════════════════════════════════════════════════════
 // HELPERS LEADS / CONVERSAS / MENSAGENS
 // ════════════════════════════════════════════════════════════════
-// Normaliza telefone BR pra formato único: 55 + DDD + 9 + número (13 dígitos)
 function normalizePhone(phone) {
   if (!phone) return phone;
   let p = String(phone).replace(/\D/g, '');
@@ -137,7 +160,6 @@ async function getOrCreateLead(phone, name = null) {
     const { data: newLead } = await supabase.from('leads').insert(insertData).select().single();
     lead = newLead;
   } else if (name && (!lead.name || /^Lead \d+$/.test(lead.name))) {
-    // Lead já existe mas sem nome OU com nome fake "Lead X" — atualiza com profile name real do WhatsApp
     const { data: updated } = await supabase
       .from('leads')
       .update({ name })
@@ -173,7 +195,8 @@ async function getOrCreateConversa(leadId) {
 }
 
 async function salvarMensagem(conversaId, leadId, role, content) {
-  await supabase.from('mensagens').insert({ conversa_id: conversaId, lead_id: leadId, role, content }); await supabase.from('conversas').update({ updated_at: new Date() }).eq('id', conversaId);
+  await supabase.from('mensagens').insert({ conversa_id: conversaId, lead_id: leadId, role, content });
+  await supabase.from('conversas').update({ updated_at: new Date() }).eq('id', conversaId);
 }
 
 async function buscarHistorico(conversaId, limite = 10) {
@@ -186,9 +209,6 @@ async function buscarHistorico(conversaId, limite = 10) {
   return (data || []).reverse();
 }
 
-// ════════════════════════════════════════════════════════════════
-// AGENTES — busca o agente certo pra responder
-// ════════════════════════════════════════════════════════════════
 async function buscarAgenteAtivo(conversaId) {
   const { data: conversa } = await supabase
     .from('conversas')
@@ -308,7 +328,9 @@ app.post('/webhook', async (req, res) => {
   try {
     const entry = req.body.entry?.[0];
     const changes = entry?.changes?.[0];
-    const value = changes?.value;     const recebidoEm = value?.metadata?.phone_number_id;     if (recebidoEm && recebidoEm !== PHONE_NUMBER_ID) { console.log(`Ignorado: msg veio pro numero ${recebidoEm}`); return; }
+    const value = changes?.value;
+    const recebidoEm = value?.metadata?.phone_number_id;
+    if (recebidoEm && recebidoEm !== PHONE_NUMBER_ID) { console.log(`Ignorado: msg veio pro numero ${recebidoEm}`); return; }
 
     if (value?.statuses?.length) {
       for (const st of value.statuses) {
@@ -354,7 +376,12 @@ app.post('/webhook', async (req, res) => {
     const historico = await buscarHistorico(conversa.id);
     const agente = await buscarAgenteAtivo(conversa.id);
 
-    await sendTypingIndicator(message.id);     const reply = await askClara(text, historico, agente);     const tempoEspera = calcularTempoDigitando(reply);     console.log(`Aguardando ${tempoEspera}ms antes de responder`);     await new Promise(r => setTimeout(r, tempoEspera));
+    await sendTypingIndicator(message.id);
+    const reply = await askClara(text, historico, agente);
+    const tempoEspera = calcularTempoDigitando(reply);
+    console.log(`Aguardando ${tempoEspera}ms antes de responder`);
+    await new Promise(r => setTimeout(r, tempoEspera));
+
     await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
     await sendWhatsAppMessage(from, reply);
   } catch (err) {
@@ -640,9 +667,8 @@ app.post('/api/campanhas/:id/disparar', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-// API CONTROLE MANUAL DA CONVERSA (pausar/retomar Clara + envio manual + marcar lida)
+// API CONTROLE MANUAL DA CONVERSA
 // ════════════════════════════════════════════════════════════════
-
 app.post('/api/conversas/:id/pausar', async (req, res) => {
   try {
     const { error } = await supabase
@@ -712,7 +738,6 @@ app.post('/api/conversas/:id/enviar', async (req, res) => {
   }
 });
 
-// ⭐ NOVA ROTA: marcar conversa como lida (atualiza last_read_at = now)
 app.post('/api/conversas/:id/marcar-lida', async (req, res) => {
   try {
     const { error } = await supabase
@@ -931,7 +956,7 @@ app.post('/api/gerar-recorrentes', async (req, res) => {
   res.json(result);
 });
 
-function iniciarCronDiario() { async function dispararCampanhasAgendadasFIX() {   try {     const agora = new Date();     const { data: campanhas } = await supabase       .from('campanhas')       .select('id, nome, agendada_para, status')       .not('agendada_para', 'is', null)       .eq('status', 'rascunho')       .lte('agendada_para', agora.toISOString());     if (!campanhas || !campanhas.length) return;     console.log(`⏰ ${campanhas.length} campanha(s) agendada(s) pronta(s) pra disparar`);     for (const c of campanhas) {       console.log(`🚀 Disparando campanha agendada: ${c.nome} (${c.id}) — agendada para ${c.agendada_para}`);       await supabase.from('campanhas').update({ status: 'disparando', iniciada_em: new Date(), agendada_para: null }).eq('id', c.id);       await axios.post(`http://localhost:${process.env.PORT || 3000}/api/campanhas/${c.id}/disparar`).catch(e => console.error('Erro chamando disparo:', e.message));     }   } catch (err) {     console.error('Erro dispararCampanhasAgendadas:', err.message);   } }  function iniciarCronDiario() {
+function iniciarCronDiario() {
   setInterval(async () => {
     const agora = new Date();
     if (agora.getHours() === 3 && agora.getMinutes() === 0) {
