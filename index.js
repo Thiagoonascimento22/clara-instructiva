@@ -29,7 +29,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// Multer pra upload de foto de perfil (memória, max 5MB, só JPG/PNG)
 const uploadProfilePic = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -566,105 +565,133 @@ app.post('/api/whatsapp/profile-picture', uploadProfilePic.single('image'), asyn
 });
 
 // ════════════════════════════════════════════════════════════════
-// API DE DISPARO DE CAMPANHA
+// FUNÇÃO INTERNA: dispara campanha
+// ════════════════════════════════════════════════════════════════
+async function dispararCampanhaInterno(campanhaId) {
+  try {
+    const { data: campanha } = await supabase.from('campanhas').select('*').eq('id', campanhaId).single();
+    if (!campanha) return console.error('Campanha não encontrada');
+
+    await supabase.from('campanhas').update({ status: 'disparando', iniciada_em: new Date() }).eq('id', campanhaId);
+
+    const varCount = await getTemplateVariableCount(campanha.template_name);
+    console.log(`Template ${campanha.template_name} tem ${varCount} variável(eis)`);
+
+    const { data: envios } = await supabase
+      .from('campanha_envios')
+      .select('*')
+      .eq('campanha_id', campanhaId)
+      .eq('status', 'pendente');
+
+    console.log(`Disparando campanha ${campanha.nome} para ${envios?.length || 0} leads`);
+
+    let sucessos = 0, erros = 0;
+
+    for (const envio of (envios || [])) {
+      try {
+        const lead = await getOrCreateLead(envio.phone, envio.nome);
+
+        const conversa = await getOrCreateConversa(lead.id);
+        const podeSobrescrever = await deveSobrescreverCampanha(conversa.id);
+        if (!conversa.campanha_id || podeSobrescrever) {
+          await supabase
+            .from('conversas')
+            .update({ campanha_id: campanhaId })
+            .eq('id', conversa.id);
+        }
+
+        let varsToSend = [];
+        if (varCount > 0) {
+          const allVars = envio.variaveis || [];
+          varsToSend = allVars.slice(0, varCount);
+          while (varsToSend.length < varCount) {
+            varsToSend.push(envio.nome || 'amigo');
+          }
+        }
+
+        const r = await sendWhatsAppTemplate(
+          envio.phone,
+          campanha.template_name,
+          campanha.template_language,
+          varsToSend
+        );
+
+        if (r.ok) {
+          await supabase.from('campanha_envios').update({
+            status: 'enviado',
+            whatsapp_message_id: r.message_id,
+            enviado_em: new Date(),
+            lead_id: lead.id
+          }).eq('id', envio.id);
+          sucessos++;
+        } else {
+          await supabase.from('campanha_envios').update({
+            status: 'erro',
+            erro_mensagem: r.error
+          }).eq('id', envio.id);
+          erros++;
+        }
+
+        await new Promise(r => setTimeout(r, 1500));
+
+      } catch (e) {
+        console.error('Erro envio individual:', e.message);
+        await supabase.from('campanha_envios').update({
+          status: 'erro',
+          erro_mensagem: e.message
+        }).eq('id', envio.id);
+        erros++;
+      }
+    }
+
+    await supabase.from('campanhas').update({
+      status: 'concluida',
+      concluida_em: new Date(),
+      enviados: sucessos
+    }).eq('id', campanhaId);
+
+    console.log(`Campanha ${campanha.nome} concluída: ${sucessos} enviados, ${erros} erros`);
+  } catch (err) {
+    console.error('Erro disparo campanha:', err.message);
+    await supabase.from('campanhas').update({ status: 'erro' }).eq('id', campanhaId);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+// API DE DISPARO DE CAMPANHA (manual)
 // ════════════════════════════════════════════════════════════════
 app.post('/api/campanhas/:id/disparar', async (req, res) => {
   const campanhaId = req.params.id;
   res.json({ ok: true, message: 'Disparo iniciado em segundo plano' });
-
-  setImmediate(async () => {
-    try {
-      const { data: campanha } = await supabase.from('campanhas').select('*').eq('id', campanhaId).single();
-      if (!campanha) return console.error('Campanha não encontrada');
-
-      await supabase.from('campanhas').update({ status: 'disparando', iniciada_em: new Date() }).eq('id', campanhaId);
-
-      const varCount = await getTemplateVariableCount(campanha.template_name);
-      console.log(`Template ${campanha.template_name} tem ${varCount} variável(eis)`);
-
-      const { data: envios } = await supabase
-        .from('campanha_envios')
-        .select('*')
-        .eq('campanha_id', campanhaId)
-        .eq('status', 'pendente');
-
-      console.log(`Disparando campanha ${campanha.nome} para ${envios?.length || 0} leads`);
-
-      let sucessos = 0, erros = 0;
-
-      for (const envio of (envios || [])) {
-        try {
-          const lead = await getOrCreateLead(envio.phone, envio.nome);
-
-          const conversa = await getOrCreateConversa(lead.id);
-          const podeSobrescrever = await deveSobrescreverCampanha(conversa.id);
-          if (!conversa.campanha_id || podeSobrescrever) {
-            await supabase
-              .from('conversas')
-              .update({ campanha_id: campanhaId })
-              .eq('id', conversa.id);
-            console.log(`Conversa ${conversa.id} vinculada à campanha ${campanha.nome}`);
-          } else {
-            console.log(`Conversa ${conversa.id} mantida na campanha anterior (ativa)`);
-          }
-
-          let varsToSend = [];
-          if (varCount > 0) {
-            const allVars = envio.variaveis || [];
-            varsToSend = allVars.slice(0, varCount);
-            while (varsToSend.length < varCount) {
-              varsToSend.push(envio.nome || 'amigo');
-            }
-          }
-
-          const r = await sendWhatsAppTemplate(
-            envio.phone,
-            campanha.template_name,
-            campanha.template_language,
-            varsToSend
-          );
-
-          if (r.ok) {
-            await supabase.from('campanha_envios').update({
-              status: 'enviado',
-              whatsapp_message_id: r.message_id,
-              enviado_em: new Date(),
-              lead_id: lead.id
-            }).eq('id', envio.id);
-            sucessos++;
-          } else {
-            await supabase.from('campanha_envios').update({
-              status: 'erro',
-              erro_mensagem: r.error
-            }).eq('id', envio.id);
-            erros++;
-          }
-
-          await new Promise(r => setTimeout(r, 1500));
-
-        } catch (e) {
-          console.error('Erro envio individual:', e.message);
-          await supabase.from('campanha_envios').update({
-            status: 'erro',
-            erro_mensagem: e.message
-          }).eq('id', envio.id);
-          erros++;
-        }
-      }
-
-      await supabase.from('campanhas').update({
-        status: 'concluida',
-        concluida_em: new Date(),
-        enviados: sucessos
-      }).eq('id', campanhaId);
-
-      console.log(`Campanha ${campanha.nome} concluída: ${sucessos} enviados, ${erros} erros`);
-    } catch (err) {
-      console.error('Erro disparo campanha:', err.message);
-      await supabase.from('campanhas').update({ status: 'erro' }).eq('id', campanhaId);
-    }
-  });
+  setImmediate(() => dispararCampanhaInterno(campanhaId));
 });
+
+// ════════════════════════════════════════════════════════════════
+// CRON: dispara campanhas agendadas
+// ════════════════════════════════════════════════════════════════
+async function processarCampanhasAgendadas() {
+  try {
+    const agora = new Date().toISOString();
+    const { data: campanhas } = await supabase
+      .from('campanhas')
+      .select('id, nome, agendada_para')
+      .not('agendada_para', 'is', null)
+      .eq('status', 'rascunho')
+      .lte('agendada_para', agora);
+
+    if (!campanhas || !campanhas.length) return;
+
+    for (const c of campanhas) {
+      console.log(`⏰ Disparando campanha agendada: ${c.nome} (agendada para ${c.agendada_para})`);
+      // Limpa o agendamento pra não disparar 2x
+      await supabase.from('campanhas').update({ agendada_para: null }).eq('id', c.id);
+      // Dispara em background
+      setImmediate(() => dispararCampanhaInterno(c.id));
+    }
+  } catch (err) {
+    console.error('Erro processarCampanhasAgendadas:', err.message);
+  }
+}
 
 // ════════════════════════════════════════════════════════════════
 // API CONTROLE MANUAL DA CONVERSA
@@ -676,7 +703,6 @@ app.post('/api/conversas/:id/pausar', async (req, res) => {
       .update({ ia_active: false, updated_at: new Date() })
       .eq('id', req.params.id);
     if (error) throw error;
-    console.log(`Conversa ${req.params.id} pausada (humano assumiu)`);
     res.json({ ok: true, ia_active: false });
   } catch (err) {
     console.error('Erro pausar conversa:', err.message);
@@ -691,7 +717,6 @@ app.post('/api/conversas/:id/retomar', async (req, res) => {
       .update({ ia_active: true, updated_at: new Date() })
       .eq('id', req.params.id);
     if (error) throw error;
-    console.log(`Conversa ${req.params.id} retomada (Clara voltou)`);
     res.json({ ok: true, ia_active: true });
   } catch (err) {
     console.error('Erro retomar conversa:', err.message);
@@ -722,10 +747,8 @@ app.post('/api/conversas/:id/enviar', async (req, res) => {
     }
 
     await sendWhatsAppMessage(phone, mensagem);
-
     await salvarMensagem(conversa.id, conversa.lead_id, 'assistant', mensagem);
 
-    console.log(`Mensagem manual enviada para ${phone} na conversa ${conversa.id}`);
     res.json({ ok: true });
   } catch (err) {
     console.error('Erro envio manual:', err.message);
@@ -760,7 +783,7 @@ app.get('/', (req, res) => res.send('Clara da Escola Instructiva está online! �
 const PORT = process.env.PORT || 3000;
 
 // ════════════════════════════════════════════════════════════════
-// META BUSINESS API — Sincronização de gastos do WhatsApp
+// META BUSINESS API — Sincronização de gastos
 // ════════════════════════════════════════════════════════════════
 async function getCotacaoUSDBRL() {
   try {
@@ -774,38 +797,22 @@ async function getCotacaoUSDBRL() {
 }
 
 async function sincronizarGastosMeta() {
-  console.log('🔄 Iniciando sincronização Meta...');
-  
-  if (!WHATSAPP_TOKEN || !WABA_ID) {
-    console.error('Faltam credenciais Meta (WHATSAPP_TOKEN ou WABA_ID)');
-    return { success: false, error: 'Credenciais Meta não configuradas' };
-  }
+  if (!WHATSAPP_TOKEN || !WABA_ID) return { success: false, error: 'Credenciais Meta não configuradas' };
 
   const now = new Date();
   const start = new Date(now);
   start.setDate(start.getDate() - 30);
   const startTs = Math.floor(start.getTime() / 1000);
   const endTs = Math.floor(now.getTime() / 1000);
-
   const cotacao = await getCotacaoUSDBRL();
-  console.log(`💱 Cotação USD->BRL: R$ ${cotacao.toFixed(2)}`);
 
   try {
     const url = `https://graph.facebook.com/v21.0/${WABA_ID}/pricing_analytics`;
-    const params = {
-      start: startTs,
-      end: endTs,
-      granularity: 'DAILY',
-      access_token: WHATSAPP_TOKEN
-    };
-
+    const params = { start: startTs, end: endTs, granularity: 'DAILY', access_token: WHATSAPP_TOKEN };
     const response = await axios.get(url, { params, timeout: 30000 });
     const data = response.data?.data?.[0]?.data_points || [];
 
-    if (!data.length) {
-      console.log('Nenhum dado de pricing analytics retornado');
-      return await sincronizarConversationAnalytics(startTs, endTs, cotacao);
-    }
+    if (!data.length) return await sincronizarConversationAnalytics(startTs, endTs, cotacao);
 
     let totalInserido = 0, totalAtualizado = 0;
 
@@ -827,30 +834,15 @@ async function sincronizarGastosMeta() {
         .limit(1);
 
       if (existing && existing.length > 0) {
-        await supabase.from('gastos').update({
-          valor: custoBRL,
-          descricao,
-          canal: 'whatsapp'
-        }).eq('id', existing[0].id);
+        await supabase.from('gastos').update({ valor: custoBRL, descricao, canal: 'whatsapp' }).eq('id', existing[0].id);
         totalAtualizado++;
       } else {
-        await supabase.from('gastos').insert({
-          valor: custoBRL,
-          descricao,
-          data: dataDia,
-          canal: 'whatsapp',
-          categoria,
-          source: 'meta_api'
-        });
+        await supabase.from('gastos').insert({ valor: custoBRL, descricao, data: dataDia, canal: 'whatsapp', categoria, source: 'meta_api' });
         totalInserido++;
       }
     }
-
-    console.log(`✅ Meta sincronizado: ${totalInserido} novos, ${totalAtualizado} atualizados`);
     return { success: true, inserted: totalInserido, updated: totalAtualizado, cotacao };
-
   } catch (err) {
-    console.error('Erro Meta API:', err.response?.data || err.message);
     return { success: false, error: err.response?.data?.error?.message || err.message };
   }
 }
@@ -858,20 +850,12 @@ async function sincronizarGastosMeta() {
 async function sincronizarConversationAnalytics(startTs, endTs, cotacao) {
   try {
     const url = `https://graph.facebook.com/v21.0/${WABA_ID}`;
-    const params = {
-      fields: `conversation_analytics.start(${startTs}).end(${endTs}).granularity(DAILY).phone_numbers([])`,
-      access_token: WHATSAPP_TOKEN
-    };
-
+    const params = { fields: `conversation_analytics.start(${startTs}).end(${endTs}).granularity(DAILY).phone_numbers([])`, access_token: WHATSAPP_TOKEN };
     const response = await axios.get(url, { params, timeout: 30000 });
     const points = response.data?.conversation_analytics?.data?.[0]?.data_points || [];
-
-    if (!points.length) {
-      return { success: true, inserted: 0, updated: 0, message: 'Sem dados disponíveis no período' };
-    }
+    if (!points.length) return { success: true, inserted: 0, updated: 0 };
 
     let totalInserido = 0, totalAtualizado = 0;
-
     for (const point of points) {
       const dataDia = new Date((point.start || 0) * 1000).toISOString().slice(0, 10);
       const custoUSD = parseFloat(point.cost || 0);
@@ -880,13 +864,7 @@ async function sincronizarConversationAnalytics(startTs, endTs, cotacao) {
       const categoria = 'Meta WhatsApp';
       const descricao = `Conversas - ${dataDia}`;
 
-      const { data: existing } = await supabase
-        .from('gastos')
-        .select('id')
-        .eq('data', dataDia)
-        .eq('categoria', categoria)
-        .eq('source', 'meta_api')
-        .limit(1);
+      const { data: existing } = await supabase.from('gastos').select('id').eq('data', dataDia).eq('categoria', categoria).eq('source', 'meta_api').limit(1);
 
       if (existing && existing.length > 0) {
         await supabase.from('gastos').update({ valor: custoBRL, descricao, canal: 'whatsapp' }).eq('id', existing[0].id);
@@ -896,7 +874,6 @@ async function sincronizarConversationAnalytics(startTs, endTs, cotacao) {
         totalInserido++;
       }
     }
-
     return { success: true, inserted: totalInserido, updated: totalAtualizado, cotacao };
   } catch (err) {
     return { success: false, error: err.response?.data?.error?.message || err.message };
@@ -904,45 +881,23 @@ async function sincronizarConversationAnalytics(startTs, endTs, cotacao) {
 }
 
 async function gerarGastosRecorrentes() {
-  console.log('🔄 Gerando gastos recorrentes...');
   const hoje = new Date();
   const diaHoje = hoje.getDate();
   const mesAno = hoje.toISOString().slice(0, 7);
 
-  const { data: recorrentes } = await supabase
-    .from('gastos')
-    .select('*')
-    .eq('recorrente', true);
-
+  const { data: recorrentes } = await supabase.from('gastos').select('*').eq('recorrente', true);
   if (!recorrentes || !recorrentes.length) return { generated: 0 };
 
   let geradosCount = 0;
   for (const r of recorrentes) {
     const diaRec = r.recorrencia_dia || 1;
     if (diaHoje !== diaRec) continue;
-
     const dataEsperada = `${mesAno}-${String(diaRec).padStart(2, '0')}`;
-    const { data: existe } = await supabase
-      .from('gastos')
-      .select('id')
-      .eq('data', dataEsperada)
-      .eq('descricao', r.descricao)
-      .eq('source', 'recorrente')
-      .limit(1);
-
+    const { data: existe } = await supabase.from('gastos').select('id').eq('data', dataEsperada).eq('descricao', r.descricao).eq('source', 'recorrente').limit(1);
     if (existe && existe.length > 0) continue;
-
-    await supabase.from('gastos').insert({
-      valor: r.valor,
-      descricao: r.descricao,
-      data: dataEsperada,
-      canal: r.canal,
-      categoria: r.categoria || 'Outros',
-      source: 'recorrente'
-    });
+    await supabase.from('gastos').insert({ valor: r.valor, descricao: r.descricao, data: dataEsperada, canal: r.canal, categoria: r.categoria || 'Outros', source: 'recorrente' });
     geradosCount++;
   }
-  console.log(`✅ ${geradosCount} gastos recorrentes gerados`);
   return { generated: geradosCount };
 }
 
@@ -956,16 +911,26 @@ app.post('/api/gerar-recorrentes', async (req, res) => {
   res.json(result);
 });
 
+// ════════════════════════════════════════════════════════════════
+// CRON DIÁRIO + AGENDAMENTO DE CAMPANHAS
+// ════════════════════════════════════════════════════════════════
 function iniciarCronDiario() {
   setInterval(async () => {
-    const agora = new Date();
-    if (agora.getHours() === 3 && agora.getMinutes() === 0) {
-      console.log('⏰ Cron diário 03:00 disparado');
-      await sincronizarGastosMeta();
-      await gerarGastosRecorrentes();
+    try {
+      const agora = new Date();
+      // Cron diário 03:00 — sincroniza gastos
+      if (agora.getHours() === 3 && agora.getMinutes() === 0) {
+        console.log('⏰ Cron diário 03:00 disparado');
+        await sincronizarGastosMeta();
+        await gerarGastosRecorrentes();
+      }
+      // A cada minuto: verifica campanhas agendadas
+      await processarCampanhasAgendadas();
+    } catch (e) {
+      console.error('Erro cron interval:', e.message);
     }
   }, 60 * 1000);
-  console.log('⏰ Cron diário ativo (03:00)');
+  console.log('⏰ Cron ativo (campanhas agendadas + gastos diários)');
 }
 iniciarCronDiario();
 
