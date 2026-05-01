@@ -312,6 +312,185 @@ async function salvarGastoGemini(inputTokens, outputTokens) {
 }
 
 // ════════════════════════════════════════════════════════════════
+// FOLLOW-UP AUTOMÁTICO INTELIGENTE
+// ════════════════════════════════════════════════════════════════
+// Analisa se a conversa precisa de follow-up via Gemini
+async function analisarPrecisaFollowup(historico) {
+  if (!historico || historico.length === 0) return { precisa: false, motivo: 'Conversa vazia' };
+
+  const historicoTexto = historico.map(m => `${m.role === 'user' ? 'Lead' : 'Clara'}: ${m.content}`).join('\n');
+
+  const prompt = `Você é um analista de vendas. Analise a conversa abaixo e responda APENAS com um JSON válido (sem markdown, sem explicação extra).
+
+CONVERSA:
+${historicoTexto}
+
+PERGUNTA: A última mensagem foi da Clara, e o lead não respondeu há mais de 2 horas. A Clara DEVE fazer follow-up?
+
+REGRAS PARA precisa_followup = true:
+- Lead parou no meio de uma qualificação importante
+- Clara fez uma pergunta e lead não respondeu
+- Clara mandou link de pagamento sem confirmação
+- Clara apresentou oferta e lead sumiu
+- Conversa ficou em aberto sem desfecho
+
+REGRAS PARA precisa_followup = false:
+- Lead disse claramente "vou comprar" ou "já comprei"
+- Lead disse "vou pensar" ou "depois te falo" (já recebeu sinalização clara)
+- Lead disse "não tenho interesse" ou "não vai dar"
+- Conversa fechou naturalmente (lead agradeceu e despediu)
+- Última msg da Clara foi uma despedida ou agradecimento
+- Última msg da Clara já FOI um follow-up
+
+RESPONDA APENAS NESSE FORMATO JSON:
+{"precisa_followup": true/false, "motivo": "explicação curta em 1 frase"}`;
+
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }] }, { timeout: 30000 });
+    const txt = r.data.candidates[0].content.parts[0].text.trim();
+    
+    // Limpa markdown se vier
+    const cleanTxt = txt.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(cleanTxt);
+    
+    return { precisa: parsed.precisa_followup === true, motivo: parsed.motivo || '' };
+  } catch (err) {
+    console.error('Erro analisarPrecisaFollowup:', err.message);
+    return { precisa: false, motivo: 'Erro na análise, não vai mandar follow-up por segurança' };
+  }
+}
+
+// Gera mensagem de follow-up natural via Gemini
+async function gerarMensagemFollowup(historico, agente) {
+  const promptBase = agente?.system_prompt || SYSTEM_PROMPT_FALLBACK;
+  const baseConhecimento = agente?.base_conhecimento ? `\n\nBASE DE CONHECIMENTO:\n${agente.base_conhecimento}` : '';
+  const historicoTexto = historico.map(m => `${m.role === 'user' ? 'Lead' : 'Clara'}: ${m.content}`).join('\n');
+
+  const prompt = promptBase + baseConhecimento + `
+
+HISTÓRICO DA CONVERSA:
+${historicoTexto}
+
+CONTEXTO: O lead não respondeu há mais de 2 horas. Você precisa fazer um FOLLOW-UP curto e natural pra retomar a conversa.
+
+REGRAS DO FOLLOW-UP:
+- Mensagem CURTA, máximo 2 linhas
+- Tom leve, descontraído, sem pressão
+- NÃO repete tudo que já foi falado
+- Foca em retomar a conversa de onde parou
+- 1 emoji no máximo (🤝 ou 😊)
+- Não usa "!!!" nem pontuação ansiosa
+- Soa como amiga lembrando de algo, não como vendedor cobrando
+
+EXEMPLOS DE BONS FOLLOW-UPS:
+- "Oi [nome], conseguiu pensar? 🤝 Posso te ajudar com alguma dúvida?"
+- "[Nome], tudo bem? Lembrei aqui de você. Conseguiu dar uma olhada?"
+- "Oi [nome], passando pra ver se ficou alguma dúvida 😊"
+
+ESCREVA APENAS A MENSAGEM DE FOLLOW-UP, sem comentários adicionais:`;
+
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }] }, { timeout: 30000 });
+    const reply = r.data.candidates[0].content.parts[0].text.trim();
+
+    const usage = r.data.usageMetadata || {};
+    salvarGastoGemini(usage.promptTokenCount || 0, usage.candidatesTokenCount || 0).catch(() => {});
+
+    return reply;
+  } catch (err) {
+    console.error('Erro gerarMensagemFollowup:', err.message);
+    return null;
+  }
+}
+
+// Processa follow-ups de todas as conversas elegíveis
+async function processarFollowups() {
+  try {
+    const duasHorasAtras = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const vinteQuatroHorasAtras = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    // Busca conversas onde:
+    // - Não tem follow-up enviado ainda
+    // - IA está ativa
+    // - Última atualização foi entre 2h e 24h atrás (janela de 24h da Meta)
+    // - Não está arquivada
+    // - Status aberta
+    const { data: conversas, error } = await supabase
+      .from('conversas')
+      .select('id, lead_id, updated_at, leads(phone, name)')
+      .is('followup_enviado_em', null)
+      .eq('ia_active', true)
+      .eq('status', 'aberta')
+      .eq('arquivada', false)
+      .lt('updated_at', duasHorasAtras)
+      .gt('updated_at', vinteQuatroHorasAtras)
+      .limit(20);
+
+    if (error) {
+      console.error('Erro ao buscar conversas pra follow-up:', error.message);
+      return;
+    }
+
+    if (!conversas || conversas.length === 0) return;
+
+    console.log(`🔍 ${conversas.length} conversa(s) candidata(s) a follow-up`);
+
+    for (const conv of conversas) {
+      try {
+        const historico = await buscarHistorico(conv.id, 15);
+        if (!historico.length) continue;
+
+        // Última mensagem precisa ser da Clara (assistant), senão lead já respondeu
+        const ultimaMsg = historico[historico.length - 1];
+        if (ultimaMsg.role !== 'assistant') {
+          console.log(`Conversa ${conv.id}: última msg foi do lead, não precisa follow-up`);
+          continue;
+        }
+
+        // Pergunta pro Gemini se precisa follow-up
+        const analise = await analisarPrecisaFollowup(historico);
+        console.log(`Conversa ${conv.id}: precisa_followup=${analise.precisa} — ${analise.motivo}`);
+
+        if (!analise.precisa) {
+          // Marca como "decidiu não fazer follow-up" pra não reanalizar toda hora
+          await supabase.from('conversas').update({ followup_enviado_em: new Date() }).eq('id', conv.id);
+          continue;
+        }
+
+        // Gera mensagem
+        const agente = await buscarAgenteAtivo(conv.id);
+        const mensagem = await gerarMensagemFollowup(historico, agente);
+
+        if (!mensagem) {
+          console.error(`Conversa ${conv.id}: falhou em gerar mensagem`);
+          continue;
+        }
+
+        // Envia
+        const phone = conv.leads?.phone;
+        if (!phone) continue;
+
+        await sendWhatsAppMessage(phone, mensagem);
+        await salvarMensagem(conv.id, conv.lead_id, 'assistant', mensagem);
+        await supabase.from('conversas').update({ followup_enviado_em: new Date() }).eq('id', conv.id);
+
+        console.log(`✅ Follow-up enviado para ${phone}: "${mensagem.substring(0, 60)}..."`);
+
+        // Aguarda 2 segundos entre follow-ups pra não sobrecarregar
+        await new Promise(r => setTimeout(r, 2000));
+
+      } catch (e) {
+        console.error(`Erro processando follow-up da conversa ${conv.id}:`, e.message);
+      }
+    }
+  } catch (err) {
+    console.error('Erro processarFollowups:', err.message);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
 // WEBHOOKS WHATSAPP
 // ════════════════════════════════════════════════════════════════
 app.get('/webhook', (req, res) => {
@@ -366,6 +545,11 @@ app.post('/webhook', async (req, res) => {
       .in('status', ['enviado', 'entregue', 'lido']);
 
     await salvarMensagem(conversa.id, lead.id, 'user', text);
+
+    // Lead respondeu = reseta o flag de follow-up pra permitir novo no futuro se sumir de novo
+    if (conversa.followup_enviado_em) {
+      await supabase.from('conversas').update({ followup_enviado_em: null }).eq('id', conversa.id);
+    }
 
     if (conversa.ia_active === false) {
       console.log(`Clara pausada na conversa ${conversa.id} — humano assumiu, não respondendo`);
@@ -543,7 +727,6 @@ app.post('/api/whatsapp/profile-picture', uploadProfilePic.single('image'), asyn
 
     const fileHandle = uploadRes.data.h;
     if (!fileHandle) throw new Error('Falha ao receber handle do arquivo');
-    console.log(`✓ Upload concluído, handle recebido`);
 
     const profileUrl = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/whatsapp_business_profile`;
     await axios.post(
@@ -683,9 +866,7 @@ async function processarCampanhasAgendadas() {
 
     for (const c of campanhas) {
       console.log(`⏰ Disparando campanha agendada: ${c.nome} (agendada para ${c.agendada_para})`);
-      // Limpa o agendamento pra não disparar 2x
       await supabase.from('campanhas').update({ agendada_para: null }).eq('id', c.id);
-      // Dispara em background
       setImmediate(() => dispararCampanhaInterno(c.id));
     }
   } catch (err) {
@@ -775,6 +956,12 @@ app.post('/api/conversas/:id/marcar-lida', async (req, res) => {
   }
 });
 
+// Endpoint pra forçar processamento de follow-ups (debug/manual)
+app.post('/api/processar-followups', async (req, res) => {
+  res.json({ ok: true, message: 'Processamento iniciado em background' });
+  setImmediate(() => processarFollowups());
+});
+
 // ════════════════════════════════════════════════════════════════
 // HEALTH CHECK
 // ════════════════════════════════════════════════════════════════
@@ -791,7 +978,7 @@ async function getCotacaoUSDBRL() {
     const cotacao = parseFloat(r.data?.USDBRL?.bid);
     if (cotacao && cotacao > 0) return cotacao;
   } catch (e) {
-    console.error('Erro ao buscar cotação:', e.message);
+    // silencia erro de rate limit
   }
   return 5.50;
 }
@@ -912,8 +1099,10 @@ app.post('/api/gerar-recorrentes', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-// CRON DIÁRIO + AGENDAMENTO DE CAMPANHAS
+// CRON: agendamento + follow-up + diário
 // ════════════════════════════════════════════════════════════════
+let followupContador = 0;
+
 function iniciarCronDiario() {
   setInterval(async () => {
     try {
@@ -926,11 +1115,17 @@ function iniciarCronDiario() {
       }
       // A cada minuto: verifica campanhas agendadas
       await processarCampanhasAgendadas();
+      // A cada 5 minutos: verifica follow-ups pendentes
+      followupContador++;
+      if (followupContador >= 5) {
+        followupContador = 0;
+        await processarFollowups();
+      }
     } catch (e) {
       console.error('Erro cron interval:', e.message);
     }
   }, 60 * 1000);
-  console.log('⏰ Cron ativo (campanhas agendadas + gastos diários)');
+  console.log('⏰ Cron ativo (campanhas agendadas + follow-ups + gastos diários)');
 }
 iniciarCronDiario();
 
