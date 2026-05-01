@@ -278,8 +278,9 @@ async function askClara(userMessage, historico = [], agente = null) {
 async function salvarGastoGemini(inputTokens, outputTokens) {
   if (!inputTokens && !outputTokens) return;
 
-  const PRECO_INPUT_USD = 0.075 / 1_000_000;
-  const PRECO_OUTPUT_USD = 0.30 / 1_000_000;
+  // Preços oficiais Gemini 2.5 Flash (texto): $0.30/M input, $2.50/M output
+  const PRECO_INPUT_USD = 0.30 / 1_000_000;
+  const PRECO_OUTPUT_USD = 2.50 / 1_000_000;
   const custoUSD = (inputTokens * PRECO_INPUT_USD) + (outputTokens * PRECO_OUTPUT_USD);
   if (custoUSD <= 0) return;
 
@@ -349,7 +350,11 @@ RESPONDA APENAS NESSE FORMATO JSON:
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
     const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }] }, { timeout: 30000 });
     const txt = r.data.candidates[0].content.parts[0].text.trim();
-    
+
+    // Registra o gasto desse token também (era um bug — não estava registrando)
+    const usage = r.data.usageMetadata || {};
+    salvarGastoGemini(usage.promptTokenCount || 0, usage.candidatesTokenCount || 0).catch(() => {});
+
     // Limpa markdown se vier
     const cleanTxt = txt.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(cleanTxt);
