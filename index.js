@@ -540,6 +540,55 @@ app.post('/webhook', async (req, res) => {
 
     console.log(`Mensagem recebida de ${from} (${profileName}): ${text}`);
 
+    // Buffer de 8s pra agrupar mensagens consecutivas (anti double-text robotizado)
+    await bufferarMensagem(from, text, profileName, message.id);
+
+  } catch (err) {
+    console.error('Erro webhook:', err.message);
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// BUFFER ANTI DOUBLE-TEXT
+// Quando lead manda 2+ mensagens em sequência, junta tudo e responde 1x só
+// ════════════════════════════════════════════════════════════════
+const messageBuffer = new Map(); // chave: phone | valor: { messages, profileName, timer, lastMessageId }
+const BUFFER_DELAY_MS = 8000; // 8 segundos de espera
+
+async function bufferarMensagem(from, text, profileName, messageId) {
+  const existing = messageBuffer.get(from);
+
+  if (existing) {
+    // Já tem buffer aberto pra esse número — adiciona msg e reseta timer
+    clearTimeout(existing.timer);
+    existing.messages.push(text);
+    existing.lastMessageId = messageId;
+    if (profileName && !existing.profileName) existing.profileName = profileName;
+    existing.timer = setTimeout(() => processarBufferDoLead(from), BUFFER_DELAY_MS);
+    console.log(`[BUFFER] +1 msg pra ${from} (total: ${existing.messages.length}) — reset timer 8s`);
+  } else {
+    // Primeira msg — cria buffer novo
+    const entry = {
+      messages: [text],
+      profileName,
+      lastMessageId: messageId,
+      timer: setTimeout(() => processarBufferDoLead(from), BUFFER_DELAY_MS)
+    };
+    messageBuffer.set(from, entry);
+    console.log(`[BUFFER] Aberto pra ${from} — esperando 8s`);
+  }
+}
+
+async function processarBufferDoLead(from) {
+  const entry = messageBuffer.get(from);
+  if (!entry) return;
+  messageBuffer.delete(from); // libera o buffer
+
+  try {
+    const { messages, profileName, lastMessageId } = entry;
+    const textoCombinado = messages.join('\n');
+    console.log(`[BUFFER] Processando ${messages.length} msg(s) de ${from}`);
+
     const lead = await getOrCreateLead(from, profileName);
     const conversa = await getOrCreateConversa(lead.id);
 
@@ -549,9 +598,11 @@ app.post('/webhook', async (req, res) => {
       .eq('lead_id', lead.id)
       .in('status', ['enviado', 'entregue', 'lido']);
 
-    await salvarMensagem(conversa.id, lead.id, 'user', text);
+    // Salva cada mensagem original separadamente no banco (mantém histórico fiel)
+    for (const msg of messages) {
+      await salvarMensagem(conversa.id, lead.id, 'user', msg);
+    }
 
-    // Lead respondeu = reseta o flag de follow-up pra permitir novo no futuro se sumir de novo
     if (conversa.followup_enviado_em) {
       await supabase.from('conversas').update({ followup_enviado_em: null }).eq('id', conversa.id);
     }
@@ -564,18 +615,20 @@ app.post('/webhook', async (req, res) => {
     const historico = await buscarHistorico(conversa.id);
     const agente = await buscarAgenteAtivo(conversa.id);
 
-    await sendTypingIndicator(message.id);
-    const reply = await askClara(text, historico, agente);
+    if (lastMessageId) await sendTypingIndicator(lastMessageId);
+
+    // Manda o texto COMBINADO pro Gemini — assim ela responde considerando todas as msgs juntas
+    const reply = await askClara(textoCombinado, historico, agente);
     const tempoEspera = calcularTempoDigitando(reply);
-    console.log(`Aguardando ${tempoEspera}ms antes de responder`);
+    console.log(`[BUFFER] Aguardando ${tempoEspera}ms antes de responder`);
     await new Promise(r => setTimeout(r, tempoEspera));
 
     await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
     await sendWhatsAppMessage(from, reply);
   } catch (err) {
-    console.error('Erro webhook:', err.message);
+    console.error('[BUFFER] Erro processando:', err.message);
   }
-});
+}
 
 // ════════════════════════════════════════════════════════════════
 // HOTMART
