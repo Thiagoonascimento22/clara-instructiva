@@ -1158,12 +1158,28 @@ async function uploadMediaParaMeta(buffer, mimeType, filename) {
 
 async function enviarMediaWhatsApp(to, mediaType, mediaId, caption) {
   const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
+
+  // Normaliza número BR: alguns chips antigos não aceitam o "9" depois do DDD
+  // Se chegou 5544976016467 (13 dígitos), também tenta 554476016467 (12 dígitos)
+  let normalizedTo = String(to).replace(/\D/g, '');
+  if (normalizedTo.length === 13 && normalizedTo.startsWith('55') && normalizedTo[4] === '9') {
+    // Remove o 9 depois do DDD pra match com o wa_id que a Meta registra
+    normalizedTo = normalizedTo.slice(0, 4) + normalizedTo.slice(5);
+    console.log(`📱 Número normalizado: ${to} → ${normalizedTo}`);
+  }
+
   const body = {
     messaging_product: 'whatsapp',
-    to,
+    to: normalizedTo,
     type: mediaType,
     [mediaType]: { id: mediaId }
   };
+
+  // Áudio: marca como voice note (PTT) — faz aparecer com waveform no WhatsApp
+  if (mediaType === 'audio') {
+    body.audio.voice = true;
+  }
+
   if (caption && (mediaType === 'image' || mediaType === 'video' || mediaType === 'document')) {
     body[mediaType].caption = caption;
   }
