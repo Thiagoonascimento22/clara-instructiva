@@ -1250,10 +1250,27 @@ app.post('/api/conversas/:id/enviar-midia', uploadMidia.single('arquivo'), async
     // 1. Upload pra Meta
     const mediaId = await uploadMediaParaMeta(buffer, mimeType, filename);
     if (!mediaId) throw new Error('Meta não retornou media_id');
+    console.log(`📦 Upload Meta OK, media_id: ${mediaId}`);
 
     // 2. Envia mensagem WhatsApp
     const sendResult = await enviarMediaWhatsApp(phone, tipo, mediaId, legenda);
-    console.log(`✅ Meta confirmou envio: ${JSON.stringify(sendResult).slice(0, 200)}`);
+    console.log(`✅ Meta confirmou envio: ${JSON.stringify(sendResult).slice(0, 300)}`);
+
+    // 3. Verifica status da mensagem 5 segundos depois
+    if (sendResult?.messages?.[0]?.id) {
+      const wamid = sendResult.messages[0].id;
+      setTimeout(async () => {
+        try {
+          const statusUrl = `https://graph.facebook.com/v22.0/${wamid}`;
+          const statusResp = await axios.get(statusUrl, {
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+          });
+          console.log(`📊 Status da msg ${wamid}:`, JSON.stringify(statusResp.data).slice(0, 300));
+        } catch(e) {
+          console.log(`⚠️ Status check falhou: ${e.response?.data?.error?.message || e.message}`);
+        }
+      }, 5000);
+    }
 
     // 3. Salva no banco
     const content = legenda || `[${tipo === 'audio' ? '🎤 Áudio enviado' : tipo === 'image' ? '🖼️ Imagem enviada' : tipo === 'video' ? '🎥 Vídeo enviado' : '📎 Arquivo enviado'}]`;
@@ -1277,6 +1294,21 @@ app.post('/api/conversas/:id/enviar-midia', uploadMidia.single('arquivo'), async
       error: metaError || err.message,
       hint: metaError ? 'Pode ser janela de 24h da Meta expirada ou formato não suportado' : null
     });
+  }
+});
+
+app.post('/api/debug-audio', uploadMidia.single('arquivo'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).send('Nenhum arquivo');
+    console.log(`🔬 DEBUG: convertendo ${(req.file.size/1024).toFixed(1)}KB ${req.file.mimetype}`);
+    const out = await convertToOggOpus(req.file.buffer);
+    console.log(`🔬 DEBUG: saiu ${(out.length/1024).toFixed(1)}KB`);
+    res.set('Content-Type', 'audio/ogg');
+    res.set('Content-Disposition', 'attachment; filename="debug.ogg"');
+    res.send(out);
+  } catch (e) {
+    console.error('Erro debug-audio:', e.message);
+    res.status(500).send('Erro: ' + e.message);
   }
 });
 
