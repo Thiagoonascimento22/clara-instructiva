@@ -1184,9 +1184,10 @@ function convertToOggOpus(inputBuffer) {
     const args = [
       '-i', 'pipe:0',
       '-c:a', 'libopus',
-      '-b:a', '32k',
-      '-ar', '16000',
+      '-b:a', '64k',
+      '-ar', '48000',
       '-ac', '1',
+      '-application', 'voip',
       '-f', 'ogg',
       'pipe:1'
     ];
@@ -1251,7 +1252,8 @@ app.post('/api/conversas/:id/enviar-midia', uploadMidia.single('arquivo'), async
     if (!mediaId) throw new Error('Meta não retornou media_id');
 
     // 2. Envia mensagem WhatsApp
-    await enviarMediaWhatsApp(phone, tipo, mediaId, legenda);
+    const sendResult = await enviarMediaWhatsApp(phone, tipo, mediaId, legenda);
+    console.log(`✅ Meta confirmou envio: ${JSON.stringify(sendResult).slice(0, 200)}`);
 
     // 3. Salva no banco
     const content = legenda || `[${tipo === 'audio' ? '🎤 Áudio enviado' : tipo === 'image' ? '🖼️ Imagem enviada' : tipo === 'video' ? '🎥 Vídeo enviado' : '📎 Arquivo enviado'}]`;
