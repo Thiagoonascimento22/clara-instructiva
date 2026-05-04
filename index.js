@@ -1194,7 +1194,7 @@ app.post('/api/conversas/:id/enviar-midia', uploadMidia.single('arquivo'), async
     let mimeType = req.file.mimetype;
     if (tipo === 'audio') {
       // WhatsApp aceita ogg/opus, mp3, aac, amr. Forçamos audio/ogg pra mensagem de voz.
-      if (!mimeType.startsWith('audio/')) mimeType = 'audio/ogg';
+      if (!mimeType.startsWith('audio/') || mimeType.includes('webm')) { mimeType = 'audio/ogg'; }
     }
 
     const filename = req.file.originalname || `${tipo}_${Date.now()}`;
