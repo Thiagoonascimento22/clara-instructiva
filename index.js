@@ -4,6 +4,8 @@ const axios = require('axios');
 const multer = require('multer');
 const FormData = require('form-data');
 const { createClient } = require('@supabase/supabase-js');
+const ffmpegPath = require('ffmpeg-static');
+const { spawn } = require('child_process');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -1171,6 +1173,38 @@ async function enviarMediaWhatsApp(to, mediaType, mediaId, caption) {
   return r.data;
 }
 
+// ════════════════════════════════════════════════════════════════
+// CONVERSÃO DE ÁUDIO PRA OGG/OPUS (formato nativo do WhatsApp PTT)
+// Browser grava webm/opus por padrão; renomear o mimetype não basta
+// porque o WhatsApp valida o conteúdo antes de exibir como msg de voz.
+// Usa ffmpeg pra reembrulhar o stream opus em container OGG.
+// ════════════════════════════════════════════════════════════════
+function convertToOggOpus(inputBuffer) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-i', 'pipe:0',
+      '-c:a', 'libopus',
+      '-b:a', '32k',
+      '-ar', '16000',
+      '-ac', '1',
+      '-f', 'ogg',
+      'pipe:1'
+    ];
+    const proc = spawn(ffmpegPath, args);
+    const chunks = [];
+    let stderr = '';
+    proc.stdout.on('data', c => chunks.push(c));
+    proc.stderr.on('data', c => { stderr += c.toString(); });
+    proc.on('error', reject);
+    proc.on('close', code => {
+      if (code !== 0) return reject(new Error('ffmpeg falhou: ' + stderr.slice(-500)));
+      resolve(Buffer.concat(chunks));
+    });
+    proc.stdin.write(inputBuffer);
+    proc.stdin.end();
+  });
+}
+
 app.post('/api/conversas/:id/enviar-midia', uploadMidia.single('arquivo'), async (req, res) => {
   try {
     const { tipo, legenda } = req.body; // tipo: 'audio'|'image'|'document'|'video'
@@ -1190,19 +1224,30 @@ app.post('/api/conversas/:id/enviar-midia', uploadMidia.single('arquivo'), async
     const phone = conversa.leads?.phone;
     if (!phone) return res.status(400).json({ ok: false, error: 'Lead sem telefone' });
 
-    // Determina mime certo (importante pro audio funcionar como mensagem de voz)
+    let buffer = req.file.buffer;
     let mimeType = req.file.mimetype;
+    let filename = req.file.originalname || `${tipo}_${Date.now()}`;
+
+    // Áudio: SEMPRE converte pra OGG/Opus (formato que vira msg de voz no WhatsApp)
     if (tipo === 'audio') {
-      // WhatsApp aceita ogg/opus, mp3, aac, amr. Forçamos audio/ogg pra mensagem de voz.
-      if (!mimeType.startsWith('audio/') || mimeType.includes('webm')) { mimeType = 'audio/ogg'; }
+      const sizeBefore = (buffer.length / 1024).toFixed(1);
+      console.log(`🔄 Convertendo audio (${sizeBefore}KB, ${mimeType}) pra OGG/Opus...`);
+      try {
+        buffer = await convertToOggOpus(buffer);
+        mimeType = 'audio/ogg';
+        filename = filename.replace(/\.[^.]+$/, '') + '.ogg';
+        const sizeAfter = (buffer.length / 1024).toFixed(1);
+        console.log(`✅ Conversão OK: ${sizeBefore}KB → ${sizeAfter}KB`);
+      } catch (convErr) {
+        console.error('❌ Erro convertendo audio:', convErr.message);
+        return res.status(500).json({ ok: false, error: 'Falha ao converter áudio: ' + convErr.message });
+      }
     }
 
-    const filename = req.file.originalname || `${tipo}_${Date.now()}`;
-
-    console.log(`📎 Enviando ${tipo} (${(req.file.size/1024).toFixed(1)}KB, ${mimeType}) pra ${phone}`);
+    console.log(`📎 Enviando ${tipo} (${(buffer.length/1024).toFixed(1)}KB, ${mimeType}) pra ${phone}`);
 
     // 1. Upload pra Meta
-    const mediaId = await uploadMediaParaMeta(req.file.buffer, mimeType, filename);
+    const mediaId = await uploadMediaParaMeta(buffer, mimeType, filename);
     if (!mediaId) throw new Error('Meta não retornou media_id');
 
     // 2. Envia mensagem WhatsApp
