@@ -536,6 +536,15 @@ app.post('/webhook', async (req, res) => {
     const from = message.from;
     const text = message.text?.body || '';
     const profileName = value?.contacts?.[0]?.profile?.name || null;
+    const msgType = message.type; // 'text', 'audio', 'image', 'document', 'video'
+
+    // Detecta mídia recebida do lead
+    if (['audio','image','document','video'].includes(msgType)) {
+      console.log(`Mensagem ${msgType} recebida de ${from} (${profileName})`);
+      await processarMidiaRecebida(from, message, profileName);
+      return;
+    }
+
     if (!text) return;
 
     console.log(`Mensagem recebida de ${from} (${profileName}): ${text}`);
@@ -545,6 +554,105 @@ app.post('/webhook', async (req, res) => {
 
   } catch (err) {
     console.error('Erro webhook:', err.message);
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// PROCESSAR MÍDIA RECEBIDA DO LEAD
+// Quando lead manda áudio/imagem/documento, baixa da Meta e salva
+// como mensagem com media_url. NÃO faz IA responder (pra Clara não
+// tentar responder algo que não entendeu).
+// ════════════════════════════════════════════════════════════════
+async function processarMidiaRecebida(from, message, profileName) {
+  try {
+    const msgType = message.type;
+    const mediaObj = message[msgType];
+    if (!mediaObj?.id) {
+      console.warn(`Mídia ${msgType} sem ID, ignorando`);
+      return;
+    }
+
+    // 1. Pega URL temporária do media na Meta
+    const mediaInfoUrl = `https://graph.facebook.com/v22.0/${mediaObj.id}`;
+    const infoResp = await axios.get(mediaInfoUrl, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+    });
+    const mediaDownloadUrl = infoResp.data?.url;
+    const mimeType = infoResp.data?.mime_type || mediaObj.mime_type || '';
+
+    if (!mediaDownloadUrl) {
+      console.warn(`Sem URL pra baixar mídia ${mediaObj.id}`);
+      return;
+    }
+
+    // 2. Salva info no banco (sem baixar o arquivo - usuário não pediu storage)
+    // O frontend vai fazer fetch direto via endpoint proxy quando precisar exibir
+    const lead = await getOrCreateLead(from, profileName);
+    const conversa = await getOrCreateConversa(lead.id);
+
+    const filename = mediaObj.filename || `${msgType}_${Date.now()}`;
+    const caption = message[msgType]?.caption || '';
+    const content = caption || `[${msgType === 'audio' ? '🎤 Áudio' : msgType === 'image' ? '🖼️ Imagem' : msgType === 'video' ? '🎥 Vídeo' : '📎 Documento'}]`;
+
+    await supabase.from('mensagens').insert({
+      conversa_id: conversa.id,
+      lead_id: lead.id,
+      role: 'user',
+      content,
+      media_type: msgType,
+      media_url: mediaObj.id, // Guardamos o ID da Meta — frontend vai puxar via proxy
+      media_filename: filename
+    });
+    await supabase.from('conversas').update({ updated_at: new Date() }).eq('id', conversa.id);
+
+    // Reseta flag de follow-up se lead respondeu
+    if (conversa.followup_enviado_em) {
+      await supabase.from('conversas').update({ followup_enviado_em: null }).eq('id', conversa.id);
+    }
+
+    // Marca campanha como respondida
+    await supabase
+      .from('campanha_envios')
+      .update({ status: 'respondido', respondido_em: new Date() })
+      .eq('lead_id', lead.id)
+      .in('status', ['enviado', 'entregue', 'lido']);
+
+    console.log(`✅ Mídia ${msgType} salva (id Meta: ${mediaObj.id})`);
+  } catch (err) {
+    console.error('Erro processarMidiaRecebida:', err.response?.data || err.message);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+// PROXY DE MÍDIA — frontend chama esta rota com o ID da Meta,
+// nós baixamos e devolvemos o arquivo (a Meta exige token Bearer)
+// ════════════════════════════════════════════════════════════════
+app.get('/api/media/:mediaId', async (req, res) => {
+  try {
+    const { mediaId } = req.params;
+    if (!mediaId) return res.status(400).send('Missing mediaId');
+
+    // Pega URL temporária
+    const infoResp = await axios.get(`https://graph.facebook.com/v22.0/${mediaId}`, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+    });
+    const url = infoResp.data?.url;
+    const mimeType = infoResp.data?.mime_type || 'application/octet-stream';
+    if (!url) return res.status(404).send('Media URL not found');
+
+    // Baixa o arquivo da Meta (precisa do bearer)
+    const fileResp = await axios.get(url, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+      responseType: 'arraybuffer',
+      timeout: 30000
+    });
+
+    res.set('Content-Type', mimeType);
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.send(Buffer.from(fileResp.data));
+  } catch (err) {
+    console.error('Erro proxy media:', err.response?.data || err.message);
+    res.status(500).send('Erro ao buscar mídia');
   }
 });
 
@@ -1011,6 +1119,117 @@ app.post('/api/conversas/:id/marcar-lida', async (req, res) => {
   } catch (err) {
     console.error('Erro marcar lida:', err.message);
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// ENVIO DE MÍDIA (áudio, imagem, documento)
+// Frontend envia o arquivo via multipart/form-data
+// Aqui: 1) faz upload pra Meta → pega media_id
+//       2) envia mensagem WhatsApp com esse media_id
+//       3) salva no banco
+// ════════════════════════════════════════════════════════════════
+const uploadMidia = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 16 * 1024 * 1024 } // 16MB (limite da Meta pra áudio é 16MB, imagem 5MB, doc 100MB)
+});
+
+async function uploadMediaParaMeta(buffer, mimeType, filename) {
+  // Endpoint: POST /PHONE_NUMBER_ID/media com multipart
+  const FormData = require('form-data');
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', mimeType);
+  form.append('file', buffer, { filename, contentType: mimeType });
+
+  const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/media`;
+  const r = await axios.post(url, form, {
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      ...form.getHeaders()
+    },
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity
+  });
+  return r.data?.id;
+}
+
+async function enviarMediaWhatsApp(to, mediaType, mediaId, caption) {
+  const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
+  const body = {
+    messaging_product: 'whatsapp',
+    to,
+    type: mediaType,
+    [mediaType]: { id: mediaId }
+  };
+  if (caption && (mediaType === 'image' || mediaType === 'video' || mediaType === 'document')) {
+    body[mediaType].caption = caption;
+  }
+  const r = await axios.post(url, body, {
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+  });
+  return r.data;
+}
+
+app.post('/api/conversas/:id/enviar-midia', uploadMidia.single('arquivo'), async (req, res) => {
+  try {
+    const { tipo, legenda } = req.body; // tipo: 'audio'|'image'|'document'|'video'
+    if (!req.file) return res.status(400).json({ ok: false, error: 'Nenhum arquivo enviado' });
+    if (!['audio','image','document','video'].includes(tipo)) {
+      return res.status(400).json({ ok: false, error: 'Tipo inválido (use audio, image, document ou video)' });
+    }
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('*, leads(phone)')
+      .eq('id', req.params.id)
+      .single();
+
+    if (errConv || !conversa) return res.status(404).json({ ok: false, error: 'Conversa não encontrada' });
+
+    const phone = conversa.leads?.phone;
+    if (!phone) return res.status(400).json({ ok: false, error: 'Lead sem telefone' });
+
+    // Determina mime certo (importante pro audio funcionar como mensagem de voz)
+    let mimeType = req.file.mimetype;
+    if (tipo === 'audio') {
+      // WhatsApp aceita ogg/opus, mp3, aac, amr. Forçamos audio/ogg pra mensagem de voz.
+      if (!mimeType.startsWith('audio/')) mimeType = 'audio/ogg';
+    }
+
+    const filename = req.file.originalname || `${tipo}_${Date.now()}`;
+
+    console.log(`📎 Enviando ${tipo} (${(req.file.size/1024).toFixed(1)}KB, ${mimeType}) pra ${phone}`);
+
+    // 1. Upload pra Meta
+    const mediaId = await uploadMediaParaMeta(req.file.buffer, mimeType, filename);
+    if (!mediaId) throw new Error('Meta não retornou media_id');
+
+    // 2. Envia mensagem WhatsApp
+    await enviarMediaWhatsApp(phone, tipo, mediaId, legenda);
+
+    // 3. Salva no banco
+    const content = legenda || `[${tipo === 'audio' ? '🎤 Áudio enviado' : tipo === 'image' ? '🖼️ Imagem enviada' : tipo === 'video' ? '🎥 Vídeo enviado' : '📎 Arquivo enviado'}]`;
+    await supabase.from('mensagens').insert({
+      conversa_id: conversa.id,
+      lead_id: conversa.lead_id,
+      role: 'assistant',
+      content,
+      media_type: tipo,
+      media_url: mediaId,
+      media_filename: filename
+    });
+    await supabase.from('conversas').update({ updated_at: new Date() }).eq('id', conversa.id);
+
+    res.json({ ok: true, media_id: mediaId });
+  } catch (err) {
+    console.error('Erro enviar mídia:', err.response?.data || err.message);
+    const metaError = err.response?.data?.error?.message;
+    res.status(500).json({
+      ok: false,
+      error: metaError || err.message,
+      hint: metaError ? 'Pode ser janela de 24h da Meta expirada ou formato não suportado' : null
+    });
   }
 });
 
