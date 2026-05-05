@@ -213,10 +213,21 @@ async function buscarHistorico(conversaId, limite = 10) {
 async function buscarAgenteAtivo(conversaId) {
   const { data: conversa } = await supabase
     .from('conversas')
-    .select('campanha_id, campanhas(agente_id)')
+    .select('campanha_id, agente_id_override, campanhas(agente_id)')
     .eq('id', conversaId)
     .single();
 
+  // Prioridade 1: agente_id_override (usado em recuperação Hotmart)
+  if (conversa?.agente_id_override) {
+    const { data: agente } = await supabase
+      .from('agentes')
+      .select('*')
+      .eq('id', conversa.agente_id_override)
+      .single();
+    if (agente) return agente;
+  }
+
+  // Prioridade 2: agente da campanha
   if (conversa?.campanhas?.agente_id) {
     const { data: agente } = await supabase
       .from('agentes')
@@ -226,6 +237,7 @@ async function buscarAgenteAtivo(conversaId) {
     if (agente) return agente;
   }
 
+  // Prioridade 3: agente padrão
   const { data: padrao } = await supabase
     .from('agentes')
     .select('*')
@@ -413,6 +425,167 @@ ESCREVA APENAS A MENSAGEM DE FOLLOW-UP, sem comentários adicionais:`;
 }
 
 // Processa follow-ups de todas as conversas elegíveis
+// ════════════════════════════════════════════════════════════════
+// PROCESSAR RECUPERAÇÃO DE CARRINHO ABANDONADO (HOTMART)
+// ════════════════════════════════════════════════════════════════
+// Roda no cron a cada 5 min. Faz 2 coisas:
+// 1. Envia 1ª msg pra conversas onde followup_at já passou e etapa = 'recuperacao_inicial'
+// 2. Envia follow-up 24h depois pra conversas que receberam 1ª msg e lead não respondeu
+// 3. Encerra conversas que não tiveram resposta após 48h do follow-up
+// ════════════════════════════════════════════════════════════════
+
+async function processarRecuperacaoHotmart() {
+  try {
+    const agora = new Date().toISOString();
+    const followupHoras = parseInt(process.env.HOTMART_FOLLOWUP_HORAS) || 24;
+
+    // PARTE 1: Enviar 1ª mensagem (passou os 30 min)
+    const { data: pendentes } = await supabase
+      .from('conversas')
+      .select('id, lead_id, agente_id_override, leads(phone, name), meta')
+      .eq('tipo', 'recuperacao_hotmart')
+      .eq('status', 'aberta')
+      .eq('followup_etapa', 'recuperacao_inicial')
+      .lt('followup_at', agora)
+      .limit(10);
+
+    if (pendentes && pendentes.length > 0) {
+      console.log(`🛒 ${pendentes.length} recuperação(ões) a enviar 1ª msg`);
+
+      for (const conv of pendentes) {
+        try {
+          const phone = conv.leads?.phone;
+          const nome = conv.leads?.name || 'tudo bem';
+
+          if (!phone) {
+            console.log(`⏭️  Conversa ${conv.id}: sem telefone, pulando`);
+            continue;
+          }
+
+          // Mensagem inicial de recuperação (texto fixo, NÃO usa template porque
+          // assumimos que carrinho abandonado é dentro da janela de 24h da Meta)
+          const mensagem = `Oi, ${nome}! 👋\nVi aqui que você quase fechou o curso de Inversores Solares do Prof. Celso, mas algo travou na hora de finalizar.\nAconteceu alguma coisa? Posso ajudar a resolver.`;
+
+          // Envia via WhatsApp
+          const enviado = await sendWhatsAppMessage(phone, mensagem);
+
+          if (enviado) {
+            // Salva como mensagem da assistant
+            await salvarMensagem(conv.id, conv.lead_id, 'assistant', mensagem);
+
+            // Marca como enviada e agenda follow-up pra 24h depois
+            const followupEm = new Date(Date.now() + followupHoras * 60 * 60 * 1000);
+            await supabase.from('conversas').update({
+              followup_etapa: 'aguardando_resposta',
+              followup_at: followupEm.toISOString(),
+              recuperacao_inicial_enviada_em: new Date().toISOString()
+            }).eq('id', conv.id);
+
+            console.log(`✅ Recuperação 1ª msg enviada pra ${nome} (${phone})`);
+          } else {
+            console.error(`❌ Falha enviando recuperação pra ${phone}`);
+          }
+
+          await new Promise(r => setTimeout(r, 1500));
+        } catch (e) {
+          console.error(`Erro recuperação conversa ${conv.id}:`, e.message);
+        }
+      }
+    }
+
+    // PARTE 2: Enviar FOLLOW-UP (24h sem resposta)
+    const { data: aguardando } = await supabase
+      .from('conversas')
+      .select('id, lead_id, leads(phone, name), recuperacao_inicial_enviada_em')
+      .eq('tipo', 'recuperacao_hotmart')
+      .eq('status', 'aberta')
+      .eq('followup_etapa', 'aguardando_resposta')
+      .lt('followup_at', agora)
+      .limit(10);
+
+    if (aguardando && aguardando.length > 0) {
+      console.log(`🔄 ${aguardando.length} recuperação(ões) candidatas a follow-up`);
+
+      for (const conv of aguardando) {
+        try {
+          // Verifica se o lead respondeu desde a 1ª msg
+          const enviadaEm = conv.recuperacao_inicial_enviada_em;
+          const { data: respostas } = await supabase
+            .from('mensagens')
+            .select('id')
+            .eq('conversa_id', conv.id)
+            .eq('role', 'user')
+            .gt('created_at', enviadaEm)
+            .limit(1);
+
+          if (respostas && respostas.length > 0) {
+            // Lead respondeu! Não manda follow-up automático
+            // (a Clara já cuida da conversa daqui pra frente)
+            await supabase.from('conversas').update({
+              followup_etapa: 'em_atendimento'
+            }).eq('id', conv.id);
+            console.log(`✅ Lead ${conv.leads?.name} respondeu, removendo follow-up automático`);
+            continue;
+          }
+
+          // Lead não respondeu → manda follow-up
+          const phone = conv.leads?.phone;
+          const nome = conv.leads?.name || '';
+          if (!phone) continue;
+
+          const followupMsg = `Oi, ${nome}! Apareci só pra saber se você ainda quer entrar no curso de Inversores Solares. Se sim, posso te ajudar a finalizar do jeito que encaixar melhor pra você 🤝`;
+
+          const enviado = await sendWhatsAppMessage(phone, followupMsg);
+
+          if (enviado) {
+            await salvarMensagem(conv.id, conv.lead_id, 'assistant', followupMsg);
+
+            // Agenda encerramento pra 48h depois
+            const encerrarEm = new Date(Date.now() + 48 * 60 * 60 * 1000);
+            await supabase.from('conversas').update({
+              followup_etapa: 'aguardando_followup',
+              followup_at: encerrarEm.toISOString(),
+              followup_enviado_em: new Date().toISOString()
+            }).eq('id', conv.id);
+
+            console.log(`✅ Follow-up recuperação enviado pra ${nome}`);
+          }
+
+          await new Promise(r => setTimeout(r, 1500));
+        } catch (e) {
+          console.error(`Erro follow-up recuperação ${conv.id}:`, e.message);
+        }
+      }
+    }
+
+    // PARTE 3: Encerrar conversas sem resposta após 48h do follow-up
+    const { data: encerrar } = await supabase
+      .from('conversas')
+      .select('id, leads(name)')
+      .eq('tipo', 'recuperacao_hotmart')
+      .eq('status', 'aberta')
+      .eq('followup_etapa', 'aguardando_followup')
+      .lt('followup_at', agora)
+      .limit(20);
+
+    if (encerrar && encerrar.length > 0) {
+      console.log(`🔚 ${encerrar.length} recuperação(ões) sem resposta — encerrando`);
+      for (const conv of encerrar) {
+        await supabase.from('conversas').update({
+          status: 'encerrada',
+          followup_etapa: 'encerrada_sem_resposta',
+          arquivada: true
+        }).eq('id', conv.id);
+        console.log(`🔚 Conversa de recuperação ${conv.id} (${conv.leads?.name}) encerrada — sem resposta`);
+      }
+    }
+
+  } catch (err) {
+    console.error('❌ Erro processarRecuperacaoHotmart:', err.message);
+    console.error(err.stack);
+  }
+}
+
 async function processarFollowups() {
   try {
     const duasHorasAtras = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
@@ -743,29 +916,148 @@ async function processarBufferDoLead(from) {
 // ════════════════════════════════════════════════════════════════
 // HOTMART
 // ════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
+// HOTMART WEBHOOK - RECUPERAÇÃO DE CARRINHO ABANDONADO
+// ════════════════════════════════════════════════════════════════
+//
+// Configuração na Hotmart:
+//   URL: https://clara-instructiva-production.up.railway.app/hotmart
+//   Evento: PURCHASE_OUT_OF_SHOPPING_CART (carrinho abandonado)
+//   Token: configurar no Railway como HOTMART_WEBHOOK_TOKEN
+//
+// Variáveis Railway necessárias:
+//   HOTMART_WEBHOOK_TOKEN: token gerado pela Hotmart no painel
+//   HOTMART_RECUPERACAO_AGENTE_ID: UUID do agente "Clara — Recuperação Inversores Solares"
+//   HOTMART_DELAY_MINUTOS: delay antes da 1ª msg (padrão: 30)
+//   HOTMART_FOLLOWUP_HORAS: horas pra follow-up (padrão: 24)
+//
+// Fluxo:
+//   1. Hotmart manda webhook (carrinho abandonado)
+//   2. Backend valida token, extrai dados (nome, phone, email)
+//   3. Cria/encontra lead no Supabase
+//   4. Cria conversa com tag "RECUPERAÇÃO HOTMART" e agente_id específico
+//   5. Agenda 1ª msg pra 30 min depois (via cron de follow-ups)
+//   6. Se não responder em 24h, agenda follow-up
+//   7. Após 48h sem resposta, encerra
+// ════════════════════════════════════════════════════════════════
+
 app.post('/hotmart', async (req, res) => {
+  // Responde 200 IMEDIATAMENTE pra Hotmart não dar timeout
   res.sendStatus(200);
+
   try {
-    const event = req.body.event;
-    const data = req.body.data;
-    const phone = data?.buyer?.phone;
-    const name = data?.buyer?.name?.split(' ')[0] || 'aluno';
-    const product = data?.product?.name || 'nosso curso';
+    const body = req.body || {};
+    const event = body.event;
+    const data = body.data || {};
 
-    let message = '';
-    if (event === 'PURCHASE_ABANDONED') message = `Oi ${name}! 😊 Vi que você se interessou pelo ${product}. Posso te ajudar?`;
-    else if (event === 'PURCHASE_CANCELED') message = `Oi ${name}, sua matrícula no ${product} não foi concluída. Posso ajudar! 🎓`;
-    else if (event === 'PURCHASE_BILLET_PRINTED') message = `Oi ${name}! Seu boleto do ${product} aguarda pagamento. 7 dias de garantia! 😊`;
+    // Log de debug pra inspecionar payload
+    console.log(`📩 Hotmart webhook recebido: event=${event}`);
 
-    if (message && phone) {
-      const lead = await getOrCreateLead(phone);
-      const conversa = await getOrCreateConversa(lead.id);
-      await salvarMensagem(conversa.id, lead.id, 'assistant', message);
-      await sendWhatsAppMessage(phone, message);
+    // 1. VALIDA TOKEN (segurança)
+    const tokenRecebido = req.headers['x-hotmart-hottok']
+      || body.hottok
+      || req.headers['hottok'];
+    const tokenEsperado = process.env.HOTMART_WEBHOOK_TOKEN;
+
+    if (tokenEsperado && tokenRecebido !== tokenEsperado) {
+      console.error('❌ Hotmart: token inválido ou ausente');
+      return;
     }
+
+    // 2. SÓ PROCESSA CARRINHO ABANDONADO (por enquanto)
+    // Hotmart usa diferentes nomes pra esse evento dependendo da versão da API:
+    const eventosCarrinhoAbandonado = [
+      'PURCHASE_OUT_OF_SHOPPING_CART',
+      'PURCHASE_ABANDONED',
+      'CART_ABANDONED'
+    ];
+    if (!eventosCarrinhoAbandonado.includes(event)) {
+      console.log(`⏭️  Evento ${event} não tratado — só processamos carrinho abandonado`);
+      return;
+    }
+
+    // 3. EXTRAI DADOS DO LEAD
+    const buyer = data.buyer || {};
+    const phone = buyer.phone || buyer.checkout_phone;
+    const fullName = buyer.name || buyer.checkout_name || 'aluno';
+    const firstName = fullName.split(' ')[0];
+    const email = buyer.email || buyer.checkout_email;
+    const product = data.product?.name || 'curso de Inversores Solares';
+
+    if (!phone) {
+      console.error('❌ Hotmart: telefone não encontrado no payload');
+      return;
+    }
+
+    console.log(`🛒 Carrinho abandonado: ${firstName} (${phone}) - ${product}`);
+
+    // 4. CRIA OU ATUALIZA LEAD
+    const lead = await getOrCreateLead(phone, firstName);
+    if (email && lead && !lead.email) {
+      await supabase.from('leads').update({ email }).eq('id', lead.id);
+    }
+
+    // 5. VERIFICA SE JÁ EXISTE CONVERSA DE RECUPERAÇÃO ABERTA PRA ESSE LEAD
+    // (evita disparar 2 mensagens se Hotmart mandar webhook duplicado)
+    const { data: conversasExistentes } = await supabase
+      .from('conversas')
+      .select('id, created_at')
+      .eq('lead_id', lead.id)
+      .eq('status', 'aberta')
+      .eq('tipo', 'recuperacao_hotmart')
+      .limit(1);
+
+    if (conversasExistentes && conversasExistentes.length > 0) {
+      console.log(`⏭️  Já existe conversa de recuperação aberta pro lead ${firstName} — ignorando`);
+      return;
+    }
+
+    // 6. CRIA NOVA CONVERSA DE RECUPERAÇÃO
+    const delayMinutos = parseInt(process.env.HOTMART_DELAY_MINUTOS) || 30;
+    const enviarEm = new Date(Date.now() + delayMinutos * 60 * 1000);
+
+    const agenteId = process.env.HOTMART_RECUPERACAO_AGENTE_ID || null;
+
+    const { data: novaConversa, error: errConv } = await supabase
+      .from('conversas')
+      .insert({
+        lead_id: lead.id,
+        channel: 'whatsapp',
+        status: 'aberta',
+        arquivada: false,
+        tipo: 'recuperacao_hotmart',
+        agente_id_override: agenteId,
+        ia_active: true,
+        followup_at: enviarEm.toISOString(),
+        followup_etapa: 'recuperacao_inicial',
+        meta: {
+          hotmart_event: event,
+          produto: product,
+          email: email,
+          nome_completo: fullName,
+          recebido_em: new Date().toISOString()
+        }
+      })
+      .select()
+      .single();
+
+    if (errConv) {
+      console.error('❌ Erro criando conversa recuperação:', errConv.message);
+      return;
+    }
+
+    console.log(`✅ Conversa recuperação criada (id ${novaConversa.id}). Mensagem agendada pra ${enviarEm.toLocaleString('pt-BR')}`);
+
   } catch (err) {
-    console.error('Erro Hotmart:', err.message);
+    console.error('❌ Erro Hotmart webhook:', err.message);
+    console.error(err.stack);
   }
+});
+
+// Endpoint legado mantido por compatibilidade
+app.post('/api/hotmart-webhook', (req, res) => {
+  req.url = '/hotmart';
+  app.handle(req, res);
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -1198,12 +1490,16 @@ async function enviarMediaWhatsApp(to, mediaType, mediaId, caption) {
 function convertToOggOpus(inputBuffer) {
   return new Promise((resolve, reject) => {
     const args = [
+      '-loglevel', 'error',
       '-i', 'pipe:0',
-      '-c:a', 'libopus',
-      '-b:a', '64k',
+      '-vn',
+      '-map_metadata', '-1',
+      '-acodec', 'libopus',
+      '-b:a', '64000',
       '-ar', '48000',
       '-ac', '1',
       '-application', 'voip',
+      '-frame_duration', '60',
       '-f', 'ogg',
       'pipe:1'
     ];
@@ -1214,8 +1510,10 @@ function convertToOggOpus(inputBuffer) {
     proc.stderr.on('data', c => { stderr += c.toString(); });
     proc.on('error', reject);
     proc.on('close', code => {
-      if (code !== 0) return reject(new Error('ffmpeg falhou: ' + stderr.slice(-500)));
-      resolve(Buffer.concat(chunks));
+      if (code !== 0) return reject(new Error('ffmpeg falhou (code ' + code + '): ' + stderr.slice(-500)));
+      const out = Buffer.concat(chunks);
+      if (out.length < 100) return reject(new Error('ffmpeg gerou arquivo vazio: ' + stderr.slice(-200)));
+      resolve(out);
     });
     proc.stdin.write(inputBuffer);
     proc.stdin.end();
@@ -1244,32 +1542,34 @@ app.post('/api/conversas/:id/enviar-midia', uploadMidia.single('arquivo'), async
     let buffer = req.file.buffer;
     let mimeType = req.file.mimetype;
     let filename = req.file.originalname || `${tipo}_${Date.now()}`;
+    let metaTipo = tipo; // tipo enviado pra Meta (pode ser diferente do tipo lógico)
 
-    // Áudio: SEMPRE converte pra OGG/Opus (formato que vira msg de voz no WhatsApp)
+    // Áudio: envia como DOCUMENT pra Meta (envio como 'audio' não chega no destino nessa conta)
+    // Mantém metadados de áudio no banco pra UI continuar mostrando player
     if (tipo === 'audio') {
-      const sizeBefore = (buffer.length / 1024).toFixed(1);
-      console.log(`🔄 Convertendo audio (${sizeBefore}KB, ${mimeType}) pra OGG/Opus...`);
-      try {
-        buffer = await convertToOggOpus(buffer);
-        mimeType = 'audio/ogg';
-        filename = filename.replace(/\.[^.]+$/, '') + '.ogg';
-        const sizeAfter = (buffer.length / 1024).toFixed(1);
-        console.log(`✅ Conversão OK: ${sizeBefore}KB → ${sizeAfter}KB`);
-      } catch (convErr) {
-        console.error('❌ Erro convertendo audio:', convErr.message);
-        return res.status(500).json({ ok: false, error: 'Falha ao converter áudio: ' + convErr.message });
+      metaTipo = 'document';
+      // Garante extensão de áudio reconhecível
+      if (!/\.(ogg|opus|mp3|m4a|aac|amr|webm)$/i.test(filename)) {
+        // Detecta pela mime
+        const ext = mimeType.includes('webm') ? '.webm'
+                  : mimeType.includes('ogg') ? '.ogg'
+                  : mimeType.includes('mp4') || mimeType.includes('m4a') ? '.m4a'
+                  : mimeType.includes('mpeg') ? '.mp3'
+                  : '.ogg';
+        filename = filename.replace(/\.[^.]+$/, '') + ext;
       }
+      console.log(`🎤 Áudio será enviado como document: ${filename} (${mimeType})`);
     }
 
-    console.log(`📎 Enviando ${tipo} (${(buffer.length/1024).toFixed(1)}KB, ${mimeType}) pra ${phone}`);
+    console.log(`📎 Enviando ${metaTipo} (${(buffer.length/1024).toFixed(1)}KB, ${mimeType}) pra ${phone}`);
 
     // 1. Upload pra Meta
     const mediaId = await uploadMediaParaMeta(buffer, mimeType, filename);
     if (!mediaId) throw new Error('Meta não retornou media_id');
     console.log(`📦 Upload Meta OK, media_id: ${mediaId}`);
 
-    // 2. Envia mensagem WhatsApp
-    const sendResult = await enviarMediaWhatsApp(phone, tipo, mediaId, legenda);
+    // 2. Envia mensagem WhatsApp (passa metaTipo pro envio)
+    const sendResult = await enviarMediaWhatsApp(phone, metaTipo, mediaId, legenda, filename);
     console.log(`✅ Meta confirmou envio: ${JSON.stringify(sendResult).slice(0, 300)}`);
 
     // 3. Verifica status da mensagem 5 segundos depois
@@ -1492,6 +1792,7 @@ function iniciarCronDiario() {
       if (followupContador >= 5) {
         followupContador = 0;
         await processarFollowups();
+        await processarRecuperacaoHotmart();
       }
     } catch (e) {
       console.error('Erro cron interval:', e.message);
