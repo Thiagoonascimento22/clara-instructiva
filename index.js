@@ -443,7 +443,7 @@ async function processarRecuperacaoHotmart() {
     const { data: pendentes } = await supabase
       .from('conversas')
       .select('id, lead_id, agente_id_override, leads(phone, name), meta')
-      .eq('tipo', 'recuperacao_hotmart')
+      .eq('tipo', 'recuperacao_carrinho')
       .eq('status', 'aberta')
       .eq('followup_etapa', 'recuperacao_inicial')
       .lt('followup_at', agora)
@@ -497,7 +497,7 @@ async function processarRecuperacaoHotmart() {
     const { data: aguardando } = await supabase
       .from('conversas')
       .select('id, lead_id, leads(phone, name), recuperacao_inicial_enviada_em')
-      .eq('tipo', 'recuperacao_hotmart')
+      .eq('tipo', 'recuperacao_carrinho')
       .eq('status', 'aberta')
       .eq('followup_etapa', 'aguardando_resposta')
       .lt('followup_at', agora)
@@ -562,7 +562,7 @@ async function processarRecuperacaoHotmart() {
     const { data: encerrar } = await supabase
       .from('conversas')
       .select('id, leads(name)')
-      .eq('tipo', 'recuperacao_hotmart')
+      .eq('tipo', 'recuperacao_carrinho')
       .eq('status', 'aberta')
       .eq('followup_etapa', 'aguardando_followup')
       .lt('followup_at', agora)
@@ -1004,7 +1004,7 @@ app.post('/hotmart', async (req, res) => {
       .select('id, created_at')
       .eq('lead_id', lead.id)
       .eq('status', 'aberta')
-      .eq('tipo', 'recuperacao_hotmart')
+      .eq('tipo', 'recuperacao_carrinho')
       .limit(1);
 
     if (conversasExistentes && conversasExistentes.length > 0) {
@@ -1013,7 +1013,7 @@ app.post('/hotmart', async (req, res) => {
     }
 
     // 6. CRIA NOVA CONVERSA DE RECUPERAÇÃO
-    const delayMinutos = parseInt(process.env.HOTMART_DELAY_MINUTOS) || 30;
+    const delayMinutos = parseInt(process.env.RECUPERACAO_DELAY_MINUTOS || process.env.HOTMART_DELAY_MINUTOS) || 15;
     const enviarEm = new Date(Date.now() + delayMinutos * 60 * 1000);
 
     const agenteId = process.env.HOTMART_RECUPERACAO_AGENTE_ID || null;
@@ -1025,12 +1025,13 @@ app.post('/hotmart', async (req, res) => {
         channel: 'whatsapp',
         status: 'aberta',
         arquivada: false,
-        tipo: 'recuperacao_hotmart',
+        tipo: 'recuperacao_carrinho',
         agente_id_override: agenteId,
         ia_active: true,
         followup_at: enviarEm.toISOString(),
         followup_etapa: 'recuperacao_inicial',
         meta: {
+          plataforma: 'hotmart',
           hotmart_event: event,
           produto: product,
           email: email,
@@ -1058,6 +1059,147 @@ app.post('/hotmart', async (req, res) => {
 app.post('/api/hotmart-webhook', (req, res) => {
   req.url = '/hotmart';
   app.handle(req, res);
+});
+
+// ════════════════════════════════════════════════════════════════
+// GREENN
+// ════════════════════════════════════════════════════════════════
+// GREENN WEBHOOK - RECUPERAÇÃO DE CARRINHO ABANDONADO
+// ════════════════════════════════════════════════════════════════
+//
+// Configuração na Greenn:
+//   Produto > Conteúdos > Adicionar > Sistema Externo > Webhook
+//   Evento: Checkout abandonado
+//   URL: https://clara-instructiva-production.up.railway.app/greenn?token=XXX
+//   (XXX = valor de GREENN_WEBHOOK_TOKEN)
+//
+// Variáveis Railway:
+//   GREENN_WEBHOOK_TOKEN: token secreto pra autenticar (gerar string aleatória)
+//   RECUPERACAO_AGENTE_ID (ou HOTMART_RECUPERACAO_AGENTE_ID): UUID do agente Clara
+//   RECUPERACAO_DELAY_MINUTOS (ou HOTMART_DELAY_MINUTOS): default 15
+//   HOTMART_FOLLOWUP_HORAS: horas pra follow-up (default: 24)
+//
+// Payload Greenn (event = "checkoutAbandoned"):
+//   { type:"lead", event:"checkoutAbandoned",
+//     lead:{ name, cellphone, email, step }, product:{ id, name, amount } }
+//
+// Step do checkout (lead.step):
+//   1 = parou nos dados pessoais (lead frio)
+//   2 = parou no endereço (médio)
+//   3 = parou no pagamento (mais quente — quase comprou)
+// ════════════════════════════════════════════════════════════════
+
+app.post('/greenn', async (req, res) => {
+  // Responde 200 imediatamente pra Greenn não dar timeout
+  res.sendStatus(200);
+
+  try {
+    const body = req.body || {};
+    const event = body.event;
+    const type = body.type;
+
+    console.log(`📩 Greenn webhook recebido: type=${type}, event=${event}`);
+
+    // 1. VALIDA TOKEN (segurança)
+    // Greenn não tem signature documentada — usamos token na query string
+    const tokenRecebido = req.query.token || req.headers['x-greenn-token'];
+    const tokenEsperado = process.env.GREENN_WEBHOOK_TOKEN;
+
+    if (tokenEsperado && tokenRecebido !== tokenEsperado) {
+      console.error('❌ Greenn: token inválido ou ausente');
+      return;
+    }
+
+    // 2. SÓ PROCESSA CHECKOUT ABANDONADO
+    if (event !== 'checkoutAbandoned' || type !== 'lead') {
+      console.log(`⏭️  Evento ${type}/${event} não tratado — só processamos checkoutAbandoned`);
+      return;
+    }
+
+    // 3. EXTRAI DADOS DO LEAD
+    const leadData = body.lead || {};
+    const phone = leadData.cellphone;
+    const fullName = leadData.name || 'aluno';
+    const firstName = fullName.split(' ')[0];
+    const email = leadData.email;
+    const step = leadData.step || null;
+    const product = body.product?.name || 'curso de Inversores Solares';
+    const productId = body.product?.id || null;
+    const productAmount = body.product?.amount || null;
+
+    if (!phone) {
+      console.error('❌ Greenn: telefone (lead.cellphone) não encontrado no payload');
+      return;
+    }
+
+    console.log(`🛒 Carrinho abandonado Greenn: ${firstName} (${phone}) - ${product} [step=${step}]`);
+
+    // 4. CRIA OU ATUALIZA LEAD
+    const lead = await getOrCreateLead(phone, firstName);
+    if (email && lead && !lead.email) {
+      await supabase.from('leads').update({ email }).eq('id', lead.id);
+    }
+
+    // 5. ANTI-DUPLICAÇÃO: já existe conversa de recuperação aberta pra esse lead?
+    const { data: conversasExistentes } = await supabase
+      .from('conversas')
+      .select('id, created_at')
+      .eq('lead_id', lead.id)
+      .eq('status', 'aberta')
+      .eq('tipo', 'recuperacao_carrinho')
+      .limit(1);
+
+    if (conversasExistentes && conversasExistentes.length > 0) {
+      console.log(`⏭️  Já existe conversa de recuperação aberta pro lead ${firstName} — ignorando`);
+      return;
+    }
+
+    // 6. CRIA NOVA CONVERSA DE RECUPERAÇÃO
+    const delayMinutos = parseInt(process.env.RECUPERACAO_DELAY_MINUTOS || process.env.HOTMART_DELAY_MINUTOS) || 15;
+    const enviarEm = new Date(Date.now() + delayMinutos * 60 * 1000);
+
+    const agenteId = process.env.RECUPERACAO_AGENTE_ID
+      || process.env.HOTMART_RECUPERACAO_AGENTE_ID
+      || null;
+
+    const { data: novaConversa, error: errConv } = await supabase
+      .from('conversas')
+      .insert({
+        lead_id: lead.id,
+        channel: 'whatsapp',
+        status: 'aberta',
+        arquivada: false,
+        tipo: 'recuperacao_carrinho',
+        agente_id_override: agenteId,
+        ia_active: true,
+        followup_at: enviarEm.toISOString(),
+        followup_etapa: 'recuperacao_inicial',
+        meta: {
+          plataforma: 'greenn',
+          greenn_event: event,
+          step: step,
+          produto: product,
+          produto_id: productId,
+          produto_valor: productAmount,
+          email: email,
+          nome_completo: fullName,
+          recebido_em: new Date().toISOString()
+        }
+      })
+      .select()
+      .single();
+
+    if (errConv) {
+      console.error('❌ Erro criando conversa recuperação Greenn:', errConv.message);
+      return;
+    }
+
+    console.log(`✅ Conversa recuperação Greenn criada (id ${novaConversa.id}). Mensagem agendada pra ${enviarEm.toLocaleString('pt-BR')}`);
+
+  } catch (err) {
+    console.error('❌ Erro Greenn webhook:', err.message);
+    console.error(err.stack);
+  }
 });
 
 // ════════════════════════════════════════════════════════════════
