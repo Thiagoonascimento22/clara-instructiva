@@ -1944,4 +1944,64 @@ function iniciarCronDiario() {
 }
 iniciarCronDiario();
 
+
+// ════════════════════════════════════════════════════════════════
+// CONVITE DE EQUIPE (envia email automaticamente)
+// ════════════════════════════════════════════════════════════════
+app.post('/api/equipe/convidar', async (req, res) => {
+  try {
+    const { nome, email, role, cargo, empresa_id } = req.body;
+
+    if (!nome || !email || !empresa_id || !role) {
+      return res.status(400).json({ ok: false, error: 'Faltam campos: nome, email, role, empresa_id' });
+    }
+
+    // 1. Convida no Supabase Auth (manda email com link de definir senha)
+    const { data: inviteData, error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(email);
+
+    if (inviteErr) {
+      console.error('Erro inviteUserByEmail:', inviteErr);
+      return res.status(400).json({ ok: false, error: inviteErr.message });
+    }
+
+    const auth_user_id = inviteData?.user?.id;
+    if (!auth_user_id) {
+      return res.status(500).json({ ok: false, error: 'Nao retornou auth_user_id' });
+    }
+
+    // 2. Cria registro em usuarios (sem senha - pessoa define ao clicar no email)
+    const { error: usrErr } = await supabase
+      .from('usuarios')
+      .insert({
+        nome,
+        email,
+        role,
+        cargo: cargo || null,
+        auth_user_id,
+        ativo: true
+      });
+
+    if (usrErr) {
+      console.error('Erro insert usuarios:', usrErr);
+      return res.status(400).json({ ok: false, error: 'Erro ao criar registro de usuario: ' + usrErr.message });
+    }
+
+    // 3. Vincula em usuarios_empresa (chave do isolamento multi-tenant)
+    const { error: vincErr } = await supabase
+      .from('usuarios_empresa')
+      .insert({ user_id: auth_user_id, empresa_id, papel: role });
+
+    if (vincErr) {
+      console.error('Erro insert usuarios_empresa:', vincErr);
+      return res.status(400).json({ ok: false, error: 'Erro ao vincular a empresa: ' + vincErr.message });
+    }
+
+    console.log(`Convite enviado: ${email} -> empresa ${empresa_id}`);
+    return res.json({ ok: true, message: 'Convite enviado com sucesso!', auth_user_id });
+  } catch (e) {
+    console.error('Erro /api/equipe/convidar:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.listen(PORT, () => console.log(`Clara v3 rodando na porta ${PORT}`));
