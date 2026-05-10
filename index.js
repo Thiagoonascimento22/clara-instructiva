@@ -2191,7 +2191,10 @@ async function classificarConversa(conversaId) {
     }
 
     const geminiData = await geminiRes.json();
-    const responseText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    // Gemini pode dividir a resposta em multiplos parts — junta tudo
+    const responseText = (geminiData?.candidates?.[0]?.content?.parts || [])
+      .map(p => p?.text || '')
+      .join('') || '{}';
 
     let parsed;
     // Tenta extrair JSON com tolerância a markdown e preâmbulos do Gemini
