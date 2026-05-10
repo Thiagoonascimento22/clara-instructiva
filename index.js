@@ -2198,22 +2198,37 @@ async function classificarConversa(conversaId) {
 
     let parsed;
     // Tenta extrair JSON com tolerância a markdown e preâmbulos do Gemini
-    // Estratégia: 1) parse direto, 2) strip markdown, 3) regex pra encontrar {...}
+    // Estratégia: 1) parse direto, 2) strip markdown, 3) regex pra encontrar {...},
+    // 4) fallback: regex direto pelo stage (caso o reason tenha sido cortado)
     try {
       parsed = JSON.parse(responseText);
     } catch {
       let cleaned = responseText
-        .replace(/^[\s\S]*?```(?:json)?\s*/i, '')  // remove tudo antes e incluindo abertura ```json
-        .replace(/```[\s\S]*$/, '')                 // remove fechamento ``` e o que vem depois
+        .replace(/^[\s\S]*?```(?:json)?\s*/i, '')
+        .replace(/```[\s\S]*$/, '')
         .trim();
       try {
         parsed = JSON.parse(cleaned);
       } catch {
-        // Última tentativa: regex pelo primeiro { ao último }
         const m = responseText.match(/\{[\s\S]*\}/);
         if (m) {
           try { parsed = JSON.parse(m[0]); } catch {}
         }
+      }
+    }
+
+    // Fallback final: se JSON quebrou no meio, tenta extrair só o stage via regex
+    // (basta ter o stage pra classificar, reason é só metadata)
+    if (!parsed || !parsed.stage) {
+      const stageMatch = responseText.match(/"stage"\s*:\s*"([a-z_]+)"/i);
+      if (stageMatch && PIPELINE_STAGES.includes(stageMatch[1])) {
+        const confMatch = responseText.match(/"confidence"\s*:\s*([\d.]+)/);
+        parsed = {
+          stage: stageMatch[1],
+          confidence: confMatch ? parseFloat(confMatch[1]) : 0.5,
+          reason: 'classificado (resposta parcial)'
+        };
+        console.log('[pipeline] Recuperado de JSON truncado:', parsed.stage);
       }
     }
 
