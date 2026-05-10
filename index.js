@@ -2180,7 +2180,7 @@ async function classificarConversa(conversaId) {
         generationConfig: {
           temperature: 0.1,
           responseMimeType: 'application/json',
-          maxOutputTokens: 200
+          maxOutputTokens: 500
         }
       })
     });
