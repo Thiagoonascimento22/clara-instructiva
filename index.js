@@ -2104,7 +2104,7 @@ REGRAS DOS ESTÁGIOS (responda APENAS com o slug exato):
 Conversa pra analisar:
 {{CONVERSA}}
 
-Responda APENAS um JSON válido neste formato exato:
+Responda APENAS um JSON válido neste formato exato, SEM texto antes, SEM texto depois, SEM blocos de código markdown (\`\`\`), SEM preâmbulo. Apenas o JSON cru:
 {"stage":"slug_aqui","confidence":0.0_a_1.0,"reason":"explicação curta em 1 frase"}`;
 
 // Classifica UMA conversa
@@ -2194,10 +2194,28 @@ async function classificarConversa(conversaId) {
     const responseText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
 
     let parsed;
+    // Tenta extrair JSON com tolerância a markdown e preâmbulos do Gemini
+    // Estratégia: 1) parse direto, 2) strip markdown, 3) regex pra encontrar {...}
     try {
       parsed = JSON.parse(responseText);
-    } catch (e) {
-      console.error('[pipeline] Resposta nao-JSON:', responseText);
+    } catch {
+      let cleaned = responseText
+        .replace(/^[\s\S]*?```(?:json)?\s*/i, '')  // remove tudo antes e incluindo abertura ```json
+        .replace(/```[\s\S]*$/, '')                 // remove fechamento ``` e o que vem depois
+        .trim();
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch {
+        // Última tentativa: regex pelo primeiro { ao último }
+        const m = responseText.match(/\{[\s\S]*\}/);
+        if (m) {
+          try { parsed = JSON.parse(m[0]); } catch {}
+        }
+      }
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      console.error('[pipeline] Resposta nao-JSON:', responseText.slice(0, 300));
       return { ok: false, error: 'Resposta invalida do Gemini' };
     }
 
