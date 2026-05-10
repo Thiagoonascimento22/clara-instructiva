@@ -2083,23 +2083,49 @@ const PIPELINE_STAGES = [
   'perdido'
 ];
 
-const PIPELINE_PROMPT = `Você é um classificador de estágio de venda. Analise a conversa entre Clara (vendedora IA) e o Lead, e responda em qual estágio o lead está AGORA.
+const PIPELINE_PROMPT = `Você é um classificador de estágio de venda treinado a ENTENDER CONTEXTO completo de conversas em português antes de decidir.
 
-REGRAS DOS ESTÁGIOS (responda APENAS com o slug exato):
+⚠️ COMO PENSAR (siga esta ordem):
+1. Leia a conversa INTEIRA do começo ao fim
+2. Identifique: o lead respondeu? Clara apresentou preço? Houve compromisso de data? Houve pagamento?
+3. Só depois decida — na DÚVIDA entre dois estágios, SEMPRE escolha o MAIS CONSERVADOR (anterior na sequência), nunca pule estágios.
 
-- sem_resposta: Lead recebeu mensagem(ns) mas NUNCA respondeu. Só tem mensagens da Clara, zero do Lead.
+REGRAS POR ESTÁGIO (rígidas — siga ao pé da letra):
 
-- em_conversa: Lead está respondendo, engajado, fazendo perguntas gerais sobre o produto. Clara ainda NÃO apresentou preço/oferta concreta.
+🔘 sem_resposta
+✅ Aplicar SE: o lead NÃO enviou nenhuma mensagem ainda. Só tem mensagens da Clara.
+❌ NÃO aplicar SE: o lead respondeu QUALQUER coisa (mesmo "oi", emoji, ou só uma palavra).
 
-- em_negociacao: Clara apresentou o preço/oferta e o lead está negociando ativamente. Pedindo desconto, comparando opções, manifestando objeções de preço, ou pedindo outras formas de pagamento.
+🔘 em_conversa
+✅ Aplicar SE: o lead respondeu E está fazendo perguntas gerais (sobre o curso, sobre o que faz, etc) MAS Clara AINDA NÃO mostrou preço, valor ou link concreto.
+❌ NÃO aplicar SE: Clara já mencionou um valor R$ específico ou enviou link de pagamento.
+📌 ARMADILHA: lead perguntar "quanto custa?" SOZINHO ainda é em_conversa. Só vira em_negociacao quando CLARA RESPONDER com o preço.
 
-- agendado: Lead se comprometeu com uma DATA FUTURA específica para pagar. Frases tipo "pago dia 15", "recebo o salário sexta e fecho", "semana que vem te confirmo", "te chamo segunda-feira". TEM que haver agendamento explícito de data/dia.
+🔘 em_negociacao
+✅ Aplicar SE: Clara explicitamente apresentou um VALOR R$ específico OU enviou link de pagamento, E o lead está negociando (pedindo desconto, comparando opções, levantando objeções de preço, pedindo parcelamento).
+❌ NÃO aplicar SE: Clara ainda não apresentou número/valor concreto. Sem preço na mesa = em_conversa.
+📌 ARMADILHA: precisa ter pelo menos um R$ valor aparecendo na conversa OU mensagem de Clara com link/condição de pagamento.
 
-- aguardando_pagamento: Clara enviou link de pagamento E o lead disse que está pagando AGORA ou está finalizando. "Tô pagando", "fazendo o pix agora", "abri o link", "já estou no checkout".
+🔘 agendado
+✅ Aplicar SE: o lead deu uma DATA FUTURA ESPECÍFICA pra pagar/fechar. Frases tipo "pago dia 15", "fecho na sexta", "recebo o salário e te falo terça", "semana que vem confirmo".
+❌ NÃO aplicar SE: lead só disse "vou pensar", "depois te falo", "te aviso" sem data/dia/momento específico.
+📌 ARMADILHA: precisa ter referência TEMPORAL EXPLÍCITA (dia da semana, data, evento futuro tipo "depois do meu pagamento").
 
-- aprovado: Lead JÁ PAGOU e foi matriculado. Confirmação explícita: "comprei", "deu certo", "já paguei", "fiz o pix", confirmação de matrícula.
+🔘 aguardando_pagamento
+✅ Aplicar SE: Clara ENVIOU link de pagamento E o lead disse que tá pagando AGORA ("fazendo o pix agora", "tô no checkout", "abri o link", "vou pagar agora").
+❌ NÃO aplicar SE: lead só prometeu pagar no futuro (isso é agendado), ou Clara não mandou link ainda.
+📌 ARMADILHA: tem que ser ação de pagamento ACONTECENDO NO PRESENTE, não compromisso futuro.
 
-- perdido: Lead recusou definitivamente OU sumiu há +7 dias após engajamento. "Não tenho dinheiro", "desisto", "não me liga mais", "não quero", "perdi o interesse", ou ausência prolongada após estar em conversa.
+🔘 aprovado
+✅ Aplicar SE: o lead JÁ pagou — confirmação explícita ("paguei", "comprei", "matriculei", "deu certo", "fiz o pix"), ou Clara confirmou matrícula.
+❌ NÃO aplicar SE: lead só disse "vou pagar" — isso é agendado ou aguardando_pagamento.
+
+🔘 perdido
+✅ Aplicar SE: o lead recusou DEFINITIVAMENTE ("não tenho dinheiro", "desisto", "não quero mais", "não me liga", "perdi o interesse"), OU sumiu há mais de 7 dias após ter engajado anteriormente.
+❌ NÃO aplicar SE: lead só ficou quieto 1-2 dias (pode tar pensando), ou só fez objeção sem desistir.
+📌 ARMADILHA: silêncio curto NÃO é perdido. Precisa ter recusa explícita ou ausência prolongada.
+
+⚠️ REGRA META: se você está dividido entre 2 estágios, escolha o ANTERIOR. Exemplo: na dúvida entre em_conversa e em_negociacao → escolhe em_conversa. Na dúvida entre agendado e aguardando_pagamento → escolhe agendado. Melhor pecar por conservador do que adiantar errado.
 
 Conversa pra analisar:
 {{CONVERSA}}
