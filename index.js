@@ -2004,4 +2004,69 @@ app.post('/api/equipe/convidar', async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════════
+// REMOVER USUÁRIO COMPLETO (apaga das 3 tabelas)
+// ════════════════════════════════════════════════════════════════
+app.delete('/api/equipe/remover/:id', async (req, res) => {
+  try {
+    const userId = req.params.id;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: 'ID do usuario nao fornecido' });
+    }
+
+    // 1. Busca o auth_user_id na tabela usuarios
+    const { data: usuario, error: getErr } = await supabase
+      .from('usuarios')
+      .select('auth_user_id, nome, email')
+      .eq('id', userId)
+      .single();
+
+    if (getErr || !usuario) {
+      return res.status(404).json({ ok: false, error: 'Usuario nao encontrado' });
+    }
+
+    const authId = usuario.auth_user_id;
+
+    // 2. Remove vinculos com empresas (tabela usuarios_empresa) — multi-tenant
+    if (authId) {
+      const { error: vincErr } = await supabase
+        .from('usuarios_empresa')
+        .delete()
+        .eq('user_id', authId);
+      if (vincErr) {
+        console.error('Aviso: erro remover usuarios_empresa:', vincErr);
+        // Nao bloqueia — segue removendo
+      }
+    }
+
+    // 3. Remove perfil da tabela usuarios
+    const { error: profErr } = await supabase
+      .from('usuarios')
+      .delete()
+      .eq('id', userId);
+
+    if (profErr) {
+      console.error('Erro remover perfil usuarios:', profErr);
+      return res.status(500).json({ ok: false, error: 'Falha ao remover perfil: ' + profErr.message });
+    }
+
+    // 4. Remove do auth.users (invalida login imediatamente)
+    if (authId) {
+      const { error: authErr } = await supabase.auth.admin.deleteUser(authId);
+      if (authErr && !String(authErr.message || '').toLowerCase().includes('not found')) {
+        console.error('Aviso: erro auth.admin.deleteUser:', authErr);
+        // Perfil ja foi apagado — registra mas nao falha a request
+      }
+    }
+
+    console.log(`Usuario removido: ${usuario.nome} <${usuario.email}>`);
+    return res.json({ ok: true, message: 'Usuario removido com sucesso' });
+
+  } catch (e) {
+    console.error('Erro /api/equipe/remover:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.listen(PORT, () => console.log(`Clara v3 rodando na porta ${PORT}`));
