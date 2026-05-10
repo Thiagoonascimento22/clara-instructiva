@@ -2105,7 +2105,7 @@ Conversa pra analisar:
 {{CONVERSA}}
 
 Responda APENAS um JSON válido neste formato exato, SEM texto antes, SEM texto depois, SEM blocos de código markdown (\`\`\`), SEM preâmbulo. Apenas o JSON cru:
-{"stage":"slug_aqui","confidence":0.0_a_1.0,"reason":"explicação curta em 1 frase"}`;
+{"stage":"slug_aqui","confidence":0.0_a_1.0,"reason":"motivo curto, máximo 8 palavras"}`;
 
 // Classifica UMA conversa
 async function classificarConversa(conversaId) {
@@ -2180,7 +2180,7 @@ async function classificarConversa(conversaId) {
         generationConfig: {
           temperature: 0.1,
           responseMimeType: 'application/json',
-          maxOutputTokens: 500
+          maxOutputTokens: 1024
         }
       })
     });
