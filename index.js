@@ -2069,4 +2069,221 @@ app.delete('/api/equipe/remover/:id', async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════════
+// PIPELINE — CLASSIFICADOR DE ESTÁGIO COM IA
+// ════════════════════════════════════════════════════════════════
+
+const PIPELINE_STAGES = [
+  'sem_resposta',
+  'em_conversa',
+  'em_negociacao',
+  'agendado',
+  'aguardando_pagamento',
+  'aprovado',
+  'perdido'
+];
+
+const PIPELINE_PROMPT = `Você é um classificador de estágio de venda. Analise a conversa entre Clara (vendedora IA) e o Lead, e responda em qual estágio o lead está AGORA.
+
+REGRAS DOS ESTÁGIOS (responda APENAS com o slug exato):
+
+- sem_resposta: Lead recebeu mensagem(ns) mas NUNCA respondeu. Só tem mensagens da Clara, zero do Lead.
+
+- em_conversa: Lead está respondendo, engajado, fazendo perguntas gerais sobre o produto. Clara ainda NÃO apresentou preço/oferta concreta.
+
+- em_negociacao: Clara apresentou o preço/oferta e o lead está negociando ativamente. Pedindo desconto, comparando opções, manifestando objeções de preço, ou pedindo outras formas de pagamento.
+
+- agendado: Lead se comprometeu com uma DATA FUTURA específica para pagar. Frases tipo "pago dia 15", "recebo o salário sexta e fecho", "semana que vem te confirmo", "te chamo segunda-feira". TEM que haver agendamento explícito de data/dia.
+
+- aguardando_pagamento: Clara enviou link de pagamento E o lead disse que está pagando AGORA ou está finalizando. "Tô pagando", "fazendo o pix agora", "abri o link", "já estou no checkout".
+
+- aprovado: Lead JÁ PAGOU e foi matriculado. Confirmação explícita: "comprei", "deu certo", "já paguei", "fiz o pix", confirmação de matrícula.
+
+- perdido: Lead recusou definitivamente OU sumiu há +7 dias após engajamento. "Não tenho dinheiro", "desisto", "não me liga mais", "não quero", "perdi o interesse", ou ausência prolongada após estar em conversa.
+
+Conversa pra analisar:
+{{CONVERSA}}
+
+Responda APENAS um JSON válido neste formato exato:
+{"stage":"slug_aqui","confidence":0.0_a_1.0,"reason":"explicação curta em 1 frase"}`;
+
+// Classifica UMA conversa
+async function classificarConversa(conversaId) {
+  // 1. Busca conversa e checa se travou
+  const { data: conv, error: convErr } = await supabase
+    .from('conversas')
+    .select('id, pipeline_travado, pipeline_stage')
+    .eq('id', conversaId)
+    .single();
+
+  if (convErr || !conv) {
+    return { ok: false, error: 'Conversa nao encontrada' };
+  }
+
+  if (conv.pipeline_travado) {
+    return { 
+      ok: true, 
+      skipped: true, 
+      reason: 'Estagio travado manualmente',
+      stage: conv.pipeline_stage 
+    };
+  }
+
+  // 2. Busca últimas 40 mensagens
+  const { data: msgs, error: msgErr } = await supabase
+    .from('mensagens')
+    .select('role, content, media_type, created_at')
+    .eq('conversa_id', conversaId)
+    .order('created_at', { ascending: true })
+    .limit(40);
+
+  if (msgErr) {
+    return { ok: false, error: 'Erro ao buscar mensagens: ' + msgErr.message };
+  }
+
+  if (!msgs || msgs.length === 0) {
+    return { ok: false, error: 'Sem mensagens pra classificar' };
+  }
+
+  // Atalho: se só tem mensagens da Clara (assistant), é sem_resposta direto
+  const hasUserMsg = msgs.some(m => m.role === 'user');
+  if (!hasUserMsg) {
+    await supabase
+      .from('conversas')
+      .update({
+        pipeline_stage: 'sem_resposta',
+        pipeline_atualizado_em: new Date().toISOString(),
+        pipeline_motivo: 'Lead nunca respondeu',
+        pipeline_confidence: 1.0
+      })
+      .eq('id', conversaId);
+    return { ok: true, stage: 'sem_resposta', confidence: 1.0, reason: 'Lead nunca respondeu' };
+  }
+
+  // 3. Monta texto da conversa pro prompt
+  const conversaTexto = msgs.map(m => {
+    const quem = m.role === 'assistant' ? 'Clara' : 'Lead';
+    const conteudo = m.content || (m.media_type ? `[${m.media_type}]` : '(vazio)');
+    return `${quem}: ${conteudo}`;
+  }).join('\n');
+
+  const prompt = PIPELINE_PROMPT.replace('{{CONVERSA}}', conversaTexto);
+
+  // 4. Chama Gemini
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    const geminiRes = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: 'application/json',
+          maxOutputTokens: 200
+        }
+      })
+    });
+
+    if (!geminiRes.ok) {
+      const errTxt = await geminiRes.text();
+      return { ok: false, error: 'Gemini falhou: ' + errTxt.slice(0, 200) };
+    }
+
+    const geminiData = await geminiRes.json();
+    const responseText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+
+    let parsed;
+    try {
+      parsed = JSON.parse(responseText);
+    } catch (e) {
+      console.error('[pipeline] Resposta nao-JSON:', responseText);
+      return { ok: false, error: 'Resposta invalida do Gemini' };
+    }
+
+    // 5. Valida o stage
+    if (!PIPELINE_STAGES.includes(parsed.stage)) {
+      console.error('[pipeline] Stage invalido retornado:', parsed.stage);
+      return { ok: false, error: `Stage invalido retornado: ${parsed.stage}` };
+    }
+
+    // 6. Atualiza no banco
+    const { error: updErr } = await supabase
+      .from('conversas')
+      .update({
+        pipeline_stage: parsed.stage,
+        pipeline_atualizado_em: new Date().toISOString(),
+        pipeline_motivo: (parsed.reason || '').slice(0, 200),
+        pipeline_confidence: typeof parsed.confidence === 'number' ? parsed.confidence : null
+      })
+      .eq('id', conversaId);
+
+    if (updErr) {
+      return { ok: false, error: 'Erro ao salvar: ' + updErr.message };
+    }
+
+    return {
+      ok: true,
+      stage: parsed.stage,
+      confidence: parsed.confidence,
+      reason: parsed.reason
+    };
+
+  } catch (e) {
+    console.error('[pipeline] Erro inesperado:', e);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Endpoint: classifica UMA conversa
+app.post('/api/pipeline/classificar/:conversaId', async (req, res) => {
+  const r = await classificarConversa(req.params.conversaId);
+  if (!r.ok) return res.status(400).json(r);
+  return res.json(r);
+});
+
+// Endpoint: reclassifica TODAS as conversas não-arquivadas
+// Roda em batches de 5 em paralelo pra não estourar rate limit do Gemini
+app.post('/api/pipeline/reclassificar-tudo', async (req, res) => {
+  try {
+    const { data: conversas, error } = await supabase
+      .from('conversas')
+      .select('id')
+      .eq('arquivada', false)
+      .eq('pipeline_travado', false);
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+
+    if (!conversas || conversas.length === 0) {
+      return res.json({ ok: true, total: 0, classificadas: 0, erros: 0 });
+    }
+
+    const total = conversas.length;
+    let classificadas = 0;
+    let erros = 0;
+
+    // Processa em batches de 5 paralelos
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < conversas.length; i += BATCH_SIZE) {
+      const batch = conversas.slice(i, i + BATCH_SIZE);
+      const results = await Promise.all(
+        batch.map(c => classificarConversa(c.id))
+      );
+      results.forEach(r => {
+        if (r.ok) classificadas++;
+        else erros++;
+      });
+    }
+
+    console.log(`[pipeline] Reclassificacao: ${classificadas}/${total} OK, ${erros} erros`);
+    return res.json({ ok: true, total, classificadas, erros });
+
+  } catch (e) {
+    console.error('Erro /api/pipeline/reclassificar-tudo:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.listen(PORT, () => console.log(`Clara v3 rodando na porta ${PORT}`));
