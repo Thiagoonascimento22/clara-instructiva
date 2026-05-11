@@ -44,10 +44,91 @@ const uploadProfilePic = multer({
 const SYSTEM_PROMPT_FALLBACK = `Você é a Clara, consultora de vendas da Escola Instructiva, escola técnica em eletrônica fundada pelo Prof. Celso Muniz. Tom amigável e direto. Mensagens curtas, máx 3 parágrafos. Máx 2 emojis. Não invente preços.`;
 
 // ════════════════════════════════════════════════════════════════
+// MULTI-NUMBER WHATSAPP — Resolução de credenciais por número
+// Cada número tem seu próprio phone_number_id + access_token
+// Cache em memória de 30s pra reduzir queries no webhook (alto tráfego)
+// ════════════════════════════════════════════════════════════════
+const wppCredsCache = new Map();
+const WPP_CACHE_TTL_MS = 30000;
+
+function getCredsFromEnv() {
+  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) return null;
+  return { id: null, phone_number_id: PHONE_NUMBER_ID, access_token: WHATSAPP_TOKEN };
+}
+
+async function getCredsByPhoneNumberId(phoneNumberId) {
+  if (!phoneNumberId) return null;
+  const key = `pid:${phoneNumberId}`;
+  const cached = wppCredsCache.get(key);
+  if (cached && Date.now() - cached.at < WPP_CACHE_TTL_MS) return cached.creds;
+  try {
+    const { data } = await supabase
+      .from('whatsapp_numbers')
+      .select('id, phone_number_id, access_token, nome')
+      .eq('phone_number_id', phoneNumberId)
+      .eq('ativo', true)
+      .maybeSingle();
+    const creds = data ? { id: data.id, phone_number_id: data.phone_number_id, access_token: data.access_token, nome: data.nome } : null;
+    wppCredsCache.set(key, { creds, at: Date.now() });
+    return creds;
+  } catch (e) {
+    console.error('getCredsByPhoneNumberId erro:', e.message);
+    return null;
+  }
+}
+
+async function getCredsById(whatsappNumberId) {
+  if (!whatsappNumberId) return null;
+  const key = `id:${whatsappNumberId}`;
+  const cached = wppCredsCache.get(key);
+  if (cached && Date.now() - cached.at < WPP_CACHE_TTL_MS) return cached.creds;
+  try {
+    const { data } = await supabase
+      .from('whatsapp_numbers')
+      .select('id, phone_number_id, access_token, nome')
+      .eq('id', whatsappNumberId)
+      .eq('ativo', true)
+      .maybeSingle();
+    const creds = data ? { id: data.id, phone_number_id: data.phone_number_id, access_token: data.access_token, nome: data.nome } : null;
+    wppCredsCache.set(key, { creds, at: Date.now() });
+    return creds;
+  } catch (e) {
+    console.error('getCredsById erro:', e.message);
+    return null;
+  }
+}
+
+// Resolve credenciais a partir de uma conversa — usa o número que a conversa
+// usa OU faz fallback pro env var (backward compat)
+async function resolveCredsForConversa(conversaId) {
+  if (conversaId) {
+    try {
+      const { data: conv } = await supabase
+        .from('conversas')
+        .select('whatsapp_number_id')
+        .eq('id', conversaId)
+        .maybeSingle();
+      if (conv?.whatsapp_number_id) {
+        const c = await getCredsById(conv.whatsapp_number_id);
+        if (c) return c;
+      }
+    } catch (e) {
+      console.error('resolveCredsForConversa erro:', e.message);
+    }
+  }
+  return getCredsFromEnv();
+}
+
+// Invalida cache (chamar quando UI alterar/remover número)
+function invalidarCacheWpp() { wppCredsCache.clear(); }
+
+// ════════════════════════════════════════════════════════════════
 // HELPERS WHATSAPP
 // ════════════════════════════════════════════════════════════════
-async function sendTypingIndicator(messageId) {
-  const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
+async function sendTypingIndicator(messageId, creds = null) {
+  const c = creds || getCredsFromEnv();
+  if (!c) return;
+  const url = `https://graph.facebook.com/v22.0/${c.phone_number_id}/messages`;
   try {
     await axios.post(
       url,
@@ -57,7 +138,7 @@ async function sendTypingIndicator(messageId) {
         message_id: messageId,
         typing_indicator: { type: 'text' }
       },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+      { headers: { Authorization: `Bearer ${c.access_token}` } }
     );
     console.log(`✓ Typing indicator enviado pra mensagem ${messageId}`);
   } catch (err) {
@@ -72,15 +153,17 @@ function calcularTempoDigitando(texto) {
   return 14000;
 }
 
-async function sendWhatsAppMessage(to, message) {
-  const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
+async function sendWhatsAppMessage(to, message, creds = null) {
+  const c = creds || getCredsFromEnv();
+  if (!c) throw new Error('Sem credenciais WhatsApp configuradas');
+  const url = `https://graph.facebook.com/v22.0/${c.phone_number_id}/messages`;
   try {
     const r = await axios.post(
       url,
       { messaging_product: 'whatsapp', to, type: 'text', text: { body: message } },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+      { headers: { Authorization: `Bearer ${c.access_token}` } }
     );
-    console.log(`Mensagem enviada para ${to}`);
+    console.log(`Mensagem enviada para ${to} via número ${c.nome || c.phone_number_id}`);
     return r.data;
   } catch (err) {
     console.error('Erro WhatsApp - Status:', err.response?.status);
@@ -89,8 +172,10 @@ async function sendWhatsAppMessage(to, message) {
   }
 }
 
-async function sendWhatsAppTemplate(to, templateName, language, variables = []) {
-  const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
+async function sendWhatsAppTemplate(to, templateName, language, variables = [], creds = null) {
+  const c = creds || getCredsFromEnv();
+  if (!c) return { ok: false, error: 'Sem credenciais WhatsApp configuradas' };
+  const url = `https://graph.facebook.com/v22.0/${c.phone_number_id}/messages`;
   const body = {
     messaging_product: 'whatsapp',
     to,
@@ -108,7 +193,7 @@ async function sendWhatsAppTemplate(to, templateName, language, variables = []) 
   }
   try {
     const r = await axios.post(url, body, {
-      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+      headers: { Authorization: `Bearer ${c.access_token}` }
     });
     return { ok: true, message_id: r.data.messages?.[0]?.id };
   } catch (err) {
@@ -490,8 +575,11 @@ async function processarRecuperacaoHotmart() {
           // assumimos que carrinho abandonado é dentro da janela de 24h da Meta)
           const mensagem = `Oi, ${nome}! 👋\nVi aqui que você quase fechou o curso de Inversores Solares do Prof. Celso, mas algo travou na hora de finalizar.\nAconteceu alguma coisa? Posso ajudar a resolver.`;
 
+          // Resolve credenciais do número correto pra essa conversa
+          const credsRec = await resolveCredsForConversa(conv.id);
+
           // Envia via WhatsApp
-          const enviado = await sendWhatsAppMessage(phone, mensagem);
+          const enviado = await sendWhatsAppMessage(phone, mensagem, credsRec);
 
           if (enviado) {
             // Salva como mensagem da assistant
@@ -559,7 +647,8 @@ async function processarRecuperacaoHotmart() {
 
           const followupMsg = `Oi, ${nome}! Apareci só pra saber se você ainda quer entrar no curso de Inversores Solares. Se sim, posso te ajudar a finalizar do jeito que encaixar melhor pra você 🤝`;
 
-          const enviado = await sendWhatsAppMessage(phone, followupMsg);
+          const credsFup = await resolveCredsForConversa(conv.id);
+          const enviado = await sendWhatsAppMessage(phone, followupMsg, credsFup);
 
           if (enviado) {
             await salvarMensagem(conv.id, conv.lead_id, 'assistant', followupMsg);
@@ -676,7 +765,8 @@ async function processarFollowups() {
         const phone = conv.leads?.phone;
         if (!phone) continue;
 
-        await sendWhatsAppMessage(phone, mensagem);
+        const credsFollow = await resolveCredsForConversa(conv.id);
+        await sendWhatsAppMessage(phone, mensagem, credsFollow);
         await salvarMensagem(conv.id, conv.lead_id, 'assistant', mensagem);
         await supabase.from('conversas').update({ followup_enviado_em: new Date() }).eq('id', conv.id);
 
@@ -712,7 +802,20 @@ app.post('/webhook', async (req, res) => {
     const changes = entry?.changes?.[0];
     const value = changes?.value;
     const recebidoEm = value?.metadata?.phone_number_id;
-    if (recebidoEm && recebidoEm !== PHONE_NUMBER_ID) { console.log(`Ignorado: msg veio pro numero ${recebidoEm}`); return; }
+
+    // === MULTI-NUMBER: identifica qual dos NOSSOS números recebeu a msg ===
+    let whatsappNumberId = null; // UUID do registro em whatsapp_numbers (null = usa env var legado)
+    if (recebidoEm) {
+      const reg = await getCredsByPhoneNumberId(recebidoEm);
+      if (reg) {
+        whatsappNumberId = reg.id;
+      } else if (recebidoEm !== PHONE_NUMBER_ID) {
+        // Não tá cadastrado E não é o número do env var → ignora
+        console.log(`Ignorado: msg veio pro número ${recebidoEm} (não cadastrado em whatsapp_numbers)`);
+        return;
+      }
+      // Se chegou aqui sem reg mas igual ao env var → continua com whatsappNumberId=null (legacy)
+    }
 
     if (value?.statuses?.length) {
       for (const st of value.statuses) {
@@ -739,17 +842,17 @@ app.post('/webhook', async (req, res) => {
 
     // Detecta mídia recebida do lead
     if (['audio','image','document','video'].includes(msgType)) {
-      console.log(`Mensagem ${msgType} recebida de ${from} (${profileName})`);
-      await processarMidiaRecebida(from, message, profileName);
+      console.log(`Mensagem ${msgType} recebida de ${from} (${profileName}) via número ${recebidoEm}`);
+      await processarMidiaRecebida(from, message, profileName, whatsappNumberId);
       return;
     }
 
     if (!text) return;
 
-    console.log(`Mensagem recebida de ${from} (${profileName}): ${text}`);
+    console.log(`Mensagem recebida de ${from} (${profileName}) via ${recebidoEm}: ${text}`);
 
     // Buffer de 8s pra agrupar mensagens consecutivas (anti double-text robotizado)
-    await bufferarMensagem(from, text, profileName, message.id);
+    await bufferarMensagem(from, text, profileName, message.id, whatsappNumberId);
 
   } catch (err) {
     console.error('Erro webhook:', err.message);
@@ -862,7 +965,7 @@ app.get('/api/media/:mediaId', async (req, res) => {
 const messageBuffer = new Map(); // chave: phone | valor: { messages, profileName, timer, lastMessageId }
 const BUFFER_DELAY_MS = 8000; // 8 segundos de espera
 
-async function bufferarMensagem(from, text, profileName, messageId) {
+async function bufferarMensagem(from, text, profileName, messageId, whatsappNumberId = null) {
   const existing = messageBuffer.get(from);
 
   if (existing) {
@@ -871,6 +974,7 @@ async function bufferarMensagem(from, text, profileName, messageId) {
     existing.messages.push(text);
     existing.lastMessageId = messageId;
     if (profileName && !existing.profileName) existing.profileName = profileName;
+    if (whatsappNumberId && !existing.whatsappNumberId) existing.whatsappNumberId = whatsappNumberId;
     existing.timer = setTimeout(() => processarBufferDoLead(from), BUFFER_DELAY_MS);
     console.log(`[BUFFER] +1 msg pra ${from} (total: ${existing.messages.length}) — reset timer 8s`);
   } else {
@@ -879,6 +983,7 @@ async function bufferarMensagem(from, text, profileName, messageId) {
       messages: [text],
       profileName,
       lastMessageId: messageId,
+      whatsappNumberId,
       timer: setTimeout(() => processarBufferDoLead(from), BUFFER_DELAY_MS)
     };
     messageBuffer.set(from, entry);
@@ -892,12 +997,25 @@ async function processarBufferDoLead(from) {
   messageBuffer.delete(from); // libera o buffer
 
   try {
-    const { messages, profileName, lastMessageId } = entry;
+    const { messages, profileName, lastMessageId, whatsappNumberId } = entry;
     const textoCombinado = messages.join('\n');
     console.log(`[BUFFER] Processando ${messages.length} msg(s) de ${from}`);
 
     const lead = await getOrCreateLead(from, profileName);
     const conversa = await getOrCreateConversa(lead.id);
+
+    // === MULTI-NUMBER: associa conversa ao número que recebeu (se ainda não tiver) ===
+    if (whatsappNumberId && !conversa.whatsapp_number_id) {
+      await supabase.from('conversas')
+        .update({ whatsapp_number_id: whatsappNumberId })
+        .eq('id', conversa.id);
+      conversa.whatsapp_number_id = whatsappNumberId;
+    }
+
+    // Resolve credenciais pra enviar a resposta pelo MESMO número que recebeu
+    const creds = whatsappNumberId
+      ? (await getCredsById(whatsappNumberId)) || getCredsFromEnv()
+      : await resolveCredsForConversa(conversa.id);
 
     await supabase
       .from('campanha_envios')
@@ -922,7 +1040,7 @@ async function processarBufferDoLead(from) {
     const historico = await buscarHistorico(conversa.id);
     const agente = await buscarAgenteAtivo(conversa.id);
 
-    if (lastMessageId) await sendTypingIndicator(lastMessageId);
+    if (lastMessageId) await sendTypingIndicator(lastMessageId, creds);
 
     // Manda o texto COMBINADO pro Gemini — assim ela responde considerando todas as msgs juntas
     const reply = await askClara(textoCombinado, historico, agente, lead?.name);
@@ -931,7 +1049,7 @@ async function processarBufferDoLead(from) {
     await new Promise(r => setTimeout(r, tempoEspera));
 
     await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
-    await sendWhatsAppMessage(from, reply);
+    await sendWhatsAppMessage(from, reply, creds);
   } catch (err) {
     console.error('[BUFFER] Erro processando:', err.message);
   }
@@ -1227,6 +1345,99 @@ app.post('/greenn', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
+// API DE WHATSAPP NUMBERS (multi-número)
+// ════════════════════════════════════════════════════════════════
+// Lista números cadastrados (NÃO retorna access_token na resposta — segurança)
+app.get('/api/whatsapp-numbers', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('whatsapp_numbers')
+      .select('id, nome, display_phone, phone_number_id, whatsapp_business_id, qualidade, tier, ativo, notas, created_at, updated_at, empresa_id')
+      .order('created_at', { ascending: true });
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    res.json({ ok: true, data: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Cria novo número
+app.post('/api/whatsapp-numbers', async (req, res) => {
+  try {
+    const { nome, display_phone, phone_number_id, access_token, whatsapp_business_id, qualidade, tier, notas, empresa_id } = req.body;
+    if (!nome || !phone_number_id || !access_token) {
+      return res.status(400).json({ ok: false, error: 'Campos obrigatórios: nome, phone_number_id, access_token' });
+    }
+    const { data, error } = await supabase
+      .from('whatsapp_numbers')
+      .insert({ nome, display_phone, phone_number_id, access_token, whatsapp_business_id, qualidade, tier, notas, empresa_id, ativo: true })
+      .select('id, nome, display_phone, phone_number_id, whatsapp_business_id, qualidade, tier, ativo, notas')
+      .single();
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    invalidarCacheWpp();
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Atualiza número (incluindo trocar token)
+app.patch('/api/whatsapp-numbers/:id', async (req, res) => {
+  try {
+    const allowed = ['nome', 'display_phone', 'phone_number_id', 'access_token', 'whatsapp_business_id', 'qualidade', 'tier', 'ativo', 'notas'];
+    const updateData = {};
+    for (const k of allowed) if (req.body[k] !== undefined) updateData[k] = req.body[k];
+    if (!Object.keys(updateData).length) return res.status(400).json({ ok: false, error: 'Nada pra atualizar' });
+
+    const { data, error } = await supabase
+      .from('whatsapp_numbers')
+      .update(updateData)
+      .eq('id', req.params.id)
+      .select('id, nome, display_phone, phone_number_id, whatsapp_business_id, qualidade, tier, ativo, notas')
+      .single();
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    invalidarCacheWpp();
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Soft delete (desativa)
+app.delete('/api/whatsapp-numbers/:id', async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('whatsapp_numbers')
+      .update({ ativo: false })
+      .eq('id', req.params.id);
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    invalidarCacheWpp();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Testa credenciais de um número (chama endpoint do WhatsApp Graph API)
+app.post('/api/whatsapp-numbers/:id/test', async (req, res) => {
+  try {
+    const { data: num, error } = await supabase
+      .from('whatsapp_numbers')
+      .select('phone_number_id, access_token, nome')
+      .eq('id', req.params.id)
+      .single();
+    if (error || !num) return res.status(404).json({ ok: false, error: 'Número não encontrado' });
+
+    const url = `https://graph.facebook.com/v22.0/${num.phone_number_id}?fields=display_phone_number,verified_name,quality_rating,messaging_limit_tier`;
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${num.access_token}` } });
+    res.json({ ok: true, data: r.data });
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.message;
+    res.status(400).json({ ok: false, error: msg });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
 // API DE TEMPLATES META
 // ════════════════════════════════════════════════════════════════
 app.get('/api/templates', async (req, res) => {
@@ -1383,6 +1594,17 @@ async function dispararCampanhaInterno(campanhaId) {
 
     await supabase.from('campanhas').update({ status: 'disparando', iniciada_em: new Date() }).eq('id', campanhaId);
 
+    // === MULTI-NUMBER: resolve qual número usar pra disparar ===
+    const credsCampanha = campanha.whatsapp_number_id
+      ? (await getCredsById(campanha.whatsapp_number_id)) || getCredsFromEnv()
+      : getCredsFromEnv();
+    if (!credsCampanha) {
+      console.error(`Campanha ${campanhaId}: sem credenciais WhatsApp pra disparar`);
+      await supabase.from('campanhas').update({ status: 'erro' }).eq('id', campanhaId);
+      return;
+    }
+    console.log(`Campanha ${campanha.nome} disparará via número ${credsCampanha.nome || credsCampanha.phone_number_id}`);
+
     const varCount = await getTemplateVariableCount(campanha.template_name);
     console.log(`Template ${campanha.template_name} tem ${varCount} variável(eis)`);
 
@@ -1409,6 +1631,13 @@ async function dispararCampanhaInterno(campanhaId) {
             .eq('id', conversa.id);
         }
 
+        // === MULTI-NUMBER: associa essa conversa ao número da campanha ===
+        if (credsCampanha.id && conversa.whatsapp_number_id !== credsCampanha.id) {
+          await supabase.from('conversas')
+            .update({ whatsapp_number_id: credsCampanha.id })
+            .eq('id', conversa.id);
+        }
+
         let varsToSend = [];
         if (varCount > 0) {
           const allVars = envio.variaveis || [];
@@ -1422,7 +1651,8 @@ async function dispararCampanhaInterno(campanhaId) {
           envio.phone,
           campanha.template_name,
           campanha.template_language,
-          varsToSend
+          varsToSend,
+          credsCampanha
         );
 
         if (r.ok) {
@@ -1553,7 +1783,8 @@ app.post('/api/conversas/:id/enviar', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Lead sem telefone' });
     }
 
-    await sendWhatsAppMessage(phone, mensagem);
+    const credsManual = await resolveCredsForConversa(conversa.id);
+    await sendWhatsAppMessage(phone, mensagem, credsManual);
     await salvarMensagem(conversa.id, conversa.lead_id, 'assistant', mensagem);
 
     res.json({ ok: true });
