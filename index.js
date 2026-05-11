@@ -64,11 +64,11 @@ async function getCredsByPhoneNumberId(phoneNumberId) {
   try {
     const { data } = await supabase
       .from('whatsapp_numbers')
-      .select('id, phone_number_id, access_token, nome')
+      .select('id, phone_number_id, access_token, nome, whatsapp_business_id')
       .eq('phone_number_id', phoneNumberId)
       .eq('ativo', true)
       .maybeSingle();
-    const creds = data ? { id: data.id, phone_number_id: data.phone_number_id, access_token: data.access_token, nome: data.nome } : null;
+    const creds = data ? { id: data.id, phone_number_id: data.phone_number_id, access_token: data.access_token, nome: data.nome, whatsapp_business_id: data.whatsapp_business_id } : null;
     wppCredsCache.set(key, { creds, at: Date.now() });
     return creds;
   } catch (e) {
@@ -85,11 +85,11 @@ async function getCredsById(whatsappNumberId) {
   try {
     const { data } = await supabase
       .from('whatsapp_numbers')
-      .select('id, phone_number_id, access_token, nome')
+      .select('id, phone_number_id, access_token, nome, whatsapp_business_id')
       .eq('id', whatsappNumberId)
       .eq('ativo', true)
       .maybeSingle();
-    const creds = data ? { id: data.id, phone_number_id: data.phone_number_id, access_token: data.access_token, nome: data.nome } : null;
+    const creds = data ? { id: data.id, phone_number_id: data.phone_number_id, access_token: data.access_token, nome: data.nome, whatsapp_business_id: data.whatsapp_business_id } : null;
     wppCredsCache.set(key, { creds, at: Date.now() });
     return creds;
   } catch (e) {
@@ -205,11 +205,13 @@ async function sendWhatsAppTemplate(to, templateName, language, variables = [], 
   }
 }
 
-async function getTemplateVariableCount(templateName) {
-  if (!WABA_ID) return 0;
+async function getTemplateVariableCount(templateName, creds = null) {
+  const wabaId = creds?.whatsapp_business_id || WABA_ID;
+  const token = creds?.access_token || WHATSAPP_TOKEN;
+  if (!wabaId) return 0;
   try {
-    const url = `https://graph.facebook.com/v22.0/${WABA_ID}/message_templates?fields=name,components&limit=200`;
-    const r = await axios.get(url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    const url = `https://graph.facebook.com/v22.0/${wabaId}/message_templates?fields=name,components&limit=200`;
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
     const tpl = (r.data.data || []).find(t => t.name === templateName);
     if (!tpl) return 0;
     const body = (tpl.components || []).find(c => c.type === 'BODY')?.text || '';
@@ -1442,9 +1444,20 @@ app.post('/api/whatsapp-numbers/:id/test', async (req, res) => {
 // ════════════════════════════════════════════════════════════════
 app.get('/api/templates', async (req, res) => {
   try {
-    if (!WABA_ID) return res.status(500).json({ ok: false, error: 'WABA_ID não configurado' });
-    const url = `https://graph.facebook.com/v22.0/${WABA_ID}/message_templates?limit=100&fields=name,status,category,language,components,quality_score`;
-    const r = await axios.get(url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    // Multi-WABA: se whatsapp_number_id passado, usa WABA daquele número específico
+    let wabaId = WABA_ID;
+    let token = WHATSAPP_TOKEN;
+    const numberId = req.query.whatsapp_number_id;
+    if (numberId) {
+      const creds = await getCredsById(numberId);
+      if (creds?.whatsapp_business_id && creds?.access_token) {
+        wabaId = creds.whatsapp_business_id;
+        token = creds.access_token;
+      }
+    }
+    if (!wabaId) return res.status(500).json({ ok: false, error: 'WABA_ID não configurado pra esse número (edite o número em Canais e adicione o WABA ID)' });
+    const url = `https://graph.facebook.com/v22.0/${wabaId}/message_templates?limit=100&fields=name,status,category,language,components,quality_score`;
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
     res.json({ ok: true, data: r.data.data || [] });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.response?.data?.error?.message || err.message });
@@ -1605,7 +1618,7 @@ async function dispararCampanhaInterno(campanhaId) {
     }
     console.log(`Campanha ${campanha.nome} disparará via número ${credsCampanha.nome || credsCampanha.phone_number_id}`);
 
-    const varCount = await getTemplateVariableCount(campanha.template_name);
+    const varCount = await getTemplateVariableCount(campanha.template_name, credsCampanha);
     console.log(`Template ${campanha.template_name} tem ${varCount} variável(eis)`);
 
     const { data: envios } = await supabase
