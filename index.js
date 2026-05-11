@@ -2155,17 +2155,20 @@ async function classificarConversa(conversaId) {
     };
   }
 
-  // 2. Busca últimas 40 mensagens
-  const { data: msgs, error: msgErr } = await supabase
+  // 2. Busca últimas 40 mensagens (mais recentes — onde tá o contexto atual)
+  const { data: msgsRaw, error: msgErr } = await supabase
     .from('mensagens')
     .select('role, content, media_type, created_at')
     .eq('conversa_id', conversaId)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
     .limit(40);
 
   if (msgErr) {
     return { ok: false, error: 'Erro ao buscar mensagens: ' + msgErr.message };
   }
+
+  // Reverte pra ordem cronológica (mais antiga primeiro) pra prompt fazer sentido
+  const msgs = (msgsRaw || []).reverse();
 
   if (!msgs || msgs.length === 0) {
     return { ok: false, error: 'Sem mensagens pra classificar' };
@@ -2267,6 +2270,15 @@ async function classificarConversa(conversaId) {
     if (!PIPELINE_STAGES.includes(parsed.stage)) {
       console.error('[pipeline] Stage invalido retornado:', parsed.stage);
       return { ok: false, error: `Stage invalido retornado: ${parsed.stage}` };
+    }
+
+    // 5b. TRAVA DETERMINÍSTICA: se IA disse sem_resposta mas lead ENVIOU mensagens,
+    // sobrescreve pra em_conversa (regra binária, não pode errar)
+    if (parsed.stage === 'sem_resposta' && hasUserMsg) {
+      console.log('[pipeline] Override: IA disse sem_resposta mas lead respondeu — virando em_conversa');
+      parsed.stage = 'em_conversa';
+      parsed.reason = 'lead respondeu (override automatico)';
+      parsed.confidence = 0.6;
     }
 
     // 6. Atualiza no banco
