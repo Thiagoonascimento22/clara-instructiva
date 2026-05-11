@@ -265,18 +265,32 @@ async function deveSobrescreverCampanha(conversaId) {
   return idade > SEVEN_DAYS_MS;
 }
 
-async function askClara(userMessage, historico = [], agente = null) {
+async function askClara(userMessage, historico = [], agente = null, nomeLead = null) {
   const promptBase = agente?.system_prompt || SYSTEM_PROMPT_FALLBACK;
   const baseConhecimento = agente?.base_conhecimento ? `\n\nBASE DE CONHECIMENTO:\n${agente.base_conhecimento}` : '';
   const historicoTexto = historico.map(m => `${m.role === 'user' ? 'Lead' : 'Clara'}: ${m.content}`).join('\n');
+
+  // Normaliza nome real do lead — usa primeiro nome, ignora se vazio ou "Lead 123"
+  const nomeFirst = nomeLead && nomeLead.trim() && !/^Lead \d+$/i.test(nomeLead.trim())
+    ? nomeLead.trim().split(/\s+/)[0]
+    : null;
+
+  const regraNome = nomeFirst
+    ? `\n\n═══ NOME REAL DO LEAD: ${nomeFirst} ═══\nVocê PODE usar esse nome real ao se dirigir ao lead (em momentos de conexão, sem exagerar). REGRA ABSOLUTA: NUNCA escreva placeholders como [nome], [Nome], [primeiro nome], [Lead Name], [Nome do Lead] ou QUALQUER texto entre colchetes. Se for usar nome, é o REAL acima. Se preferir não usar nome, simplesmente não use.`
+    : `\n\n═══ NOME REAL DO LEAD: desconhecido ═══\nNão sabemos o nome real do lead ainda. REGRA ABSOLUTA: NUNCA escreva placeholders como [nome], [Nome], [primeiro nome], [Lead Name], [Nome do Lead] ou QUALQUER texto entre colchetes. Faça a mensagem SEM nome.`;
+
   const prompt = promptBase
     + baseConhecimento
+    + regraNome
     + (historicoTexto ? `\n\nHISTÓRICO:\n${historicoTexto}` : '')
     + `\n\nMensagem atual do lead: ${userMessage}`;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
   const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }] });
-  const reply = r.data.candidates[0].content.parts[0].text;
+  let reply = r.data.candidates[0].content.parts[0].text;
+
+  // FAIL-SAFE: se mesmo assim Gemini colocar placeholder, removemos antes de enviar pro lead
+  reply = reply.replace(/\[\s*(primeiro\s*nome|nome\s*do\s*lead|lead\s*name|nome|name)\s*\]/gi, nomeFirst || '').replace(/\s+/g, ' ').replace(/\s+([,.!?])/g, '$1').trim();
 
   const usage = r.data.usageMetadata || {};
   const inputTokens = usage.promptTokenCount || 0;
@@ -381,12 +395,21 @@ RESPONDA APENAS NESSE FORMATO JSON:
 }
 
 // Gera mensagem de follow-up natural via Gemini
-async function gerarMensagemFollowup(historico, agente) {
+async function gerarMensagemFollowup(historico, agente, nomeLead) {
   const promptBase = agente?.system_prompt || SYSTEM_PROMPT_FALLBACK;
   const baseConhecimento = agente?.base_conhecimento ? `\n\nBASE DE CONHECIMENTO:\n${agente.base_conhecimento}` : '';
   const historicoTexto = historico.map(m => `${m.role === 'user' ? 'Lead' : 'Clara'}: ${m.content}`).join('\n');
 
-  const prompt = promptBase + baseConhecimento + `
+  // Normaliza nome do lead: usa primeiro nome, ignora se vazio ou "Lead 123"
+  const nomeFirst = nomeLead && nomeLead.trim() && !/^Lead \d+$/i.test(nomeLead.trim())
+    ? nomeLead.trim().split(/\s+/)[0]
+    : null;
+
+  const nomeContexto = nomeFirst
+    ? `\n\nNOME REAL DO LEAD: ${nomeFirst}\nVocê PODE usar esse nome real na mensagem se fizer sentido (mas sem exagerar). NUNCA escreva placeholders como [nome], [Nome], [Lead Name] ou [Nome do Lead] — sempre o nome REAL acima ou nenhum nome.`
+    : `\n\nNOME DO LEAD: desconhecido\nFaça a mensagem SEM nome. NUNCA escreva placeholders como [nome], [Nome], [Lead Name] ou [Nome do Lead].`;
+
+  const prompt = promptBase + baseConhecimento + nomeContexto + `
 
 HISTÓRICO DA CONVERSA:
 ${historicoTexto}
@@ -401,11 +424,12 @@ REGRAS DO FOLLOW-UP:
 - 1 emoji no máximo (🤝 ou 😊)
 - Não usa "!!!" nem pontuação ansiosa
 - Soa como amiga lembrando de algo, não como vendedor cobrando
+- PROIBIDO ABSOLUTO: nunca, JAMAIS escreva [nome], [Nome], [Lead Name], [Nome do Lead] ou qualquer texto entre colchetes na mensagem. Use o nome REAL fornecido acima OU não use nome nenhum.
 
-EXEMPLOS DE BONS FOLLOW-UPS:
-- "Oi [nome], conseguiu pensar? 🤝 Posso te ajudar com alguma dúvida?"
-- "[Nome], tudo bem? Lembrei aqui de você. Conseguiu dar uma olhada?"
-- "Oi [nome], passando pra ver se ficou alguma dúvida 😊"
+EXEMPLOS DE BONS FOLLOW-UPS (formato — adapte ao contexto):
+- "Conseguiu pensar? 🤝 Posso te ajudar com alguma dúvida?"
+- "Tudo bem? Lembrei aqui de você. Conseguiu dar uma olhada?"
+- "Passando pra ver se ficou alguma dúvida 😊"
 
 ESCREVA APENAS A MENSAGEM DE FOLLOW-UP, sem comentários adicionais:`;
 
@@ -641,7 +665,7 @@ async function processarFollowups() {
 
         // Gera mensagem
         const agente = await buscarAgenteAtivo(conv.id);
-        const mensagem = await gerarMensagemFollowup(historico, agente);
+        const mensagem = await gerarMensagemFollowup(historico, agente, conv.leads?.name);
 
         if (!mensagem) {
           console.error(`Conversa ${conv.id}: falhou em gerar mensagem`);
@@ -901,7 +925,7 @@ async function processarBufferDoLead(from) {
     if (lastMessageId) await sendTypingIndicator(lastMessageId);
 
     // Manda o texto COMBINADO pro Gemini — assim ela responde considerando todas as msgs juntas
-    const reply = await askClara(textoCombinado, historico, agente);
+    const reply = await askClara(textoCombinado, historico, agente, lead?.name);
     const tempoEspera = calcularTempoDigitando(reply);
     console.log(`[BUFFER] Aguardando ${tempoEspera}ms antes de responder`);
     await new Promise(r => setTimeout(r, tempoEspera));
