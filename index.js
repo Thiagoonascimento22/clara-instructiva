@@ -362,10 +362,164 @@ async function deveSobrescreverCampanha(conversaId) {
   return idade > SEVEN_DAYS_MS;
 }
 
+// ════════════════════════════════════════════════════════════════
+// MULTI-PROVIDER IA: Gemini, OpenAI (GPT), Anthropic (Claude)
+// Controlado pela env var AI_PROVIDER (gemini|gpt|claude) — default: gemini
+// ════════════════════════════════════════════════════════════════
+
+function normalizarHistorico(historico) {
+  // Garante que mensagens alternam user/assistant e que começa com user (necessário pra Anthropic)
+  const norm = [];
+  for (const m of historico || []) {
+    const role = m.role === 'user' ? 'user' : 'assistant';
+    const last = norm[norm.length - 1];
+    if (last && last.role === role) {
+      last.content += '\n' + m.content;
+    } else {
+      norm.push({ role, content: m.content });
+    }
+  }
+  while (norm.length && norm[0].role !== 'user') norm.shift();
+  return norm;
+}
+
+async function chamarGemini(systemPrompt, historico, userMessage) {
+  const historicoTexto = (historico || []).map(m => `${m.role === 'user' ? 'Lead' : 'Clara'}: ${m.content}`).join('\n');
+  const prompt = systemPrompt + (historicoTexto ? `\n\nHISTÓRICO:\n${historicoTexto}` : '') + `\n\nMensagem atual do lead: ${userMessage}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+  const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }] });
+  const reply = r.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const usage = r.data.usageMetadata || {};
+  return {
+    reply,
+    inputTokens: usage.promptTokenCount || 0,
+    outputTokens: usage.candidatesTokenCount || 0,
+    provider: 'gemini',
+    model: 'gemini-2.5-flash'
+  };
+}
+
+async function chamarOpenAI(systemPrompt, historico, userMessage) {
+  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY não configurada no Railway');
+  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...normalizarHistorico(historico),
+    { role: 'user', content: userMessage }
+  ];
+  const r = await axios.post('https://api.openai.com/v1/chat/completions',
+    { model, messages, temperature: 0.8 },
+    { headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' } }
+  );
+  const reply = r.data.choices?.[0]?.message?.content || '';
+  const usage = r.data.usage || {};
+  return {
+    reply,
+    inputTokens: usage.prompt_tokens || 0,
+    outputTokens: usage.completion_tokens || 0,
+    provider: 'gpt',
+    model
+  };
+}
+
+async function chamarAnthropic(systemPrompt, historico, userMessage) {
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY não configurada no Railway');
+  const model = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001';
+  const messages = [
+    ...normalizarHistorico(historico),
+    { role: 'user', content: userMessage }
+  ];
+  const r = await axios.post('https://api.anthropic.com/v1/messages',
+    { model, max_tokens: 1024, system: systemPrompt, messages },
+    { headers: {
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json'
+    } }
+  );
+  const reply = r.data.content?.[0]?.text || '';
+  const usage = r.data.usage || {};
+  return {
+    reply,
+    inputTokens: usage.input_tokens || 0,
+    outputTokens: usage.output_tokens || 0,
+    provider: 'claude',
+    model
+  };
+}
+
+// Wrapper: escolhe o provider baseado em AI_PROVIDER
+async function gerarRespostaIA(systemPrompt, historico, userMessage) {
+  const provider = String(process.env.AI_PROVIDER || 'gemini').toLowerCase().trim();
+  console.log(`🤖 [AI] Provider: ${provider}`);
+  try {
+    if (provider === 'gpt' || provider === 'openai') return await chamarOpenAI(systemPrompt, historico, userMessage);
+    if (provider === 'claude' || provider === 'anthropic') return await chamarAnthropic(systemPrompt, historico, userMessage);
+    return await chamarGemini(systemPrompt, historico, userMessage);
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.message;
+    console.error(`🤖 [AI] Erro no provider ${provider}: ${msg}. Fallback pra Gemini...`);
+    // Fallback automático pra Gemini se o provider primário falhar
+    if (provider !== 'gemini') return await chamarGemini(systemPrompt, historico, userMessage);
+    throw err;
+  }
+}
+
+// Salva gasto da IA no banco com preço correto por provider
+async function salvarGastoIA(provider, inputTokens, outputTokens, model = null) {
+  const precos = {
+    gemini: { input: 0.30, output: 2.50, label: 'Gemini 2.5 Flash' },
+    'gpt-4o-mini': { input: 0.15, output: 0.60, label: 'GPT-4o-mini' },
+    'gpt-4o': { input: 2.50, output: 10.00, label: 'GPT-4o' },
+    'gpt-4-turbo': { input: 10.00, output: 30.00, label: 'GPT-4 Turbo' },
+    'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00, label: 'Claude Haiku 4.5' },
+    'claude-sonnet-4-6': { input: 3.00, output: 15.00, label: 'Claude Sonnet 4.6' },
+    'claude-opus-4-7': { input: 15.00, output: 75.00, label: 'Claude Opus 4.7' }
+  };
+  const key = (provider === 'gemini') ? 'gemini' : (model && precos[model]) ? model : (provider === 'gpt' ? 'gpt-4o-mini' : (provider === 'claude' ? 'claude-haiku-4-5-20251001' : 'gemini'));
+  const p = precos[key];
+  if (!p) return;
+  const usdInput = (inputTokens / 1_000_000) * p.input;
+  const usdOutput = (outputTokens / 1_000_000) * p.output;
+  const usdTotal = usdInput + usdOutput;
+  const brlTotal = usdTotal * 6.0; // taxa USD-BRL aproximada
+  const hoje = new Date().toISOString().slice(0, 10);
+  const sourceTag = `${provider}_auto`;
+  try {
+    // Acumula gasto diário (se já tem registro hoje, soma; senão cria)
+    const { data: existing } = await supabase
+      .from('gastos')
+      .select('id, valor_brl, valor_usd, tokens_input, tokens_output')
+      .eq('data', hoje)
+      .eq('source', sourceTag)
+      .maybeSingle();
+    if (existing) {
+      await supabase.from('gastos').update({
+        valor_brl: Number(existing.valor_brl || 0) + brlTotal,
+        valor_usd: Number(existing.valor_usd || 0) + usdTotal,
+        tokens_input: Number(existing.tokens_input || 0) + inputTokens,
+        tokens_output: Number(existing.tokens_output || 0) + outputTokens
+      }).eq('id', existing.id);
+    } else {
+      await supabase.from('gastos').insert({
+        data: hoje,
+        descricao: `${p.label} - ${hoje}`,
+        valor_brl: brlTotal,
+        valor_usd: usdTotal,
+        canal: provider,
+        tokens_input: inputTokens,
+        tokens_output: outputTokens,
+        source: sourceTag
+      });
+    }
+  } catch (e) {
+    console.error('Erro ao salvar gasto IA:', e.message);
+  }
+}
+
 async function askClara(userMessage, historico = [], agente = null, nomeLead = null) {
   const promptBase = agente?.system_prompt || SYSTEM_PROMPT_FALLBACK;
   const baseConhecimento = agente?.base_conhecimento ? `\n\nBASE DE CONHECIMENTO:\n${agente.base_conhecimento}` : '';
-  const historicoTexto = historico.map(m => `${m.role === 'user' ? 'Lead' : 'Clara'}: ${m.content}`).join('\n');
 
   // Normaliza nome real do lead — usa primeiro nome, ignora se vazio ou "Lead 123"
   const nomeFirst = nomeLead && nomeLead.trim() && !/^Lead \d+$/i.test(nomeLead.trim())
@@ -376,25 +530,19 @@ async function askClara(userMessage, historico = [], agente = null, nomeLead = n
     ? `\n\n═══ NOME REAL DO LEAD: ${nomeFirst} ═══\nVocê PODE usar esse nome real ao se dirigir ao lead (em momentos de conexão, sem exagerar). REGRA ABSOLUTA: NUNCA escreva placeholders como [nome], [Nome], [primeiro nome], [Lead Name], [Nome do Lead] ou QUALQUER texto entre colchetes. Se for usar nome, é o REAL acima. Se preferir não usar nome, simplesmente não use.`
     : `\n\n═══ NOME REAL DO LEAD: desconhecido ═══\nNão sabemos o nome real do lead ainda. REGRA ABSOLUTA: NUNCA escreva placeholders como [nome], [Nome], [primeiro nome], [Lead Name], [Nome do Lead] ou QUALQUER texto entre colchetes. Faça a mensagem SEM nome.`;
 
-  const prompt = promptBase
-    + baseConhecimento
-    + regraNome
-    + (historicoTexto ? `\n\nHISTÓRICO:\n${historicoTexto}` : '')
-    + `\n\nMensagem atual do lead: ${userMessage}`;
+  const systemPrompt = promptBase + baseConhecimento + regraNome;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-  const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }] });
-  let reply = r.data.candidates[0].content.parts[0].text;
+  // Multi-provider: usa Gemini, GPT ou Claude baseado em env var AI_PROVIDER
+  const resultado = await gerarRespostaIA(systemPrompt, historico, userMessage);
+  let reply = resultado.reply || '';
 
-  // FAIL-SAFE: se mesmo assim Gemini colocar placeholder, removemos antes de enviar pro lead
+  // FAIL-SAFE: remove placeholders que algumas IAs colocam
   reply = reply.replace(/\[\s*(primeiro\s*nome|nome\s*do\s*lead|lead\s*name|nome|name)\s*\]/gi, nomeFirst || '').replace(/\s+/g, ' ').replace(/\s+([,.!?])/g, '$1').trim();
 
-  const usage = r.data.usageMetadata || {};
-  const inputTokens = usage.promptTokenCount || 0;
-  const outputTokens = usage.candidatesTokenCount || 0;
+  console.log(`🤖 [AI] ${resultado.provider}/${resultado.model} respondeu — ${resultado.inputTokens}in + ${resultado.outputTokens}out tokens`);
 
-  salvarGastoGemini(inputTokens, outputTokens).catch(e => 
-    console.error('Erro ao salvar gasto Gemini:', e.message)
+  salvarGastoIA(resultado.provider, resultado.inputTokens, resultado.outputTokens, resultado.model).catch(e =>
+    console.error('Erro ao salvar gasto IA:', e.message)
   );
 
   return reply;
