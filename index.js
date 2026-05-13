@@ -1405,9 +1405,55 @@ async function ensureWabaExists(whatsapp_business_id, access_token, empresa_id, 
       return null;
     }
     console.log(`✓ WABA criada automaticamente: ${apelido} (${whatsapp_business_id})`);
+
+    // Auto-subscribe: registra o app aos eventos dessa WABA pra mensagens chegarem
+    if (access_token) {
+      try {
+        const url = `https://graph.facebook.com/v22.0/${whatsapp_business_id}/subscribed_apps`;
+        await axios.post(url, {}, { headers: { Authorization: `Bearer ${access_token}` } });
+        console.log(`✓ App auto-subscribed à WABA ${whatsapp_business_id}`);
+      } catch (subErr) {
+        const msg = subErr.response?.data?.error?.message || subErr.message;
+        console.error(`⚠ Auto-subscribe falhou pra WABA ${whatsapp_business_id}: ${msg}`);
+        // Não bloqueia o cadastro — apenas avisa que o subscribe precisa ser feito depois
+      }
+    }
     return nova.id;
   } catch (e) {
     console.error('ensureWabaExists erro:', e.message);
+    return null;
+  }
+}
+
+// Função auxiliar: sincroniza a foto de perfil de um número WhatsApp Business da Meta.
+// Pega a URL da foto via API da Meta e salva no banco (campo avatar_url).
+async function syncFotoPerfil(whatsappNumberUuid) {
+  try {
+    const { data: numero } = await supabase
+      .from('whatsapp_numbers')
+      .select('id, phone_number_id, access_token, nome')
+      .eq('id', whatsappNumberUuid)
+      .maybeSingle();
+    if (!numero?.phone_number_id || !numero?.access_token) {
+      console.log(`⚠ syncFotoPerfil: número ${whatsappNumberUuid} sem phone_number_id ou token`);
+      return null;
+    }
+    const url = `https://graph.facebook.com/v22.0/${numero.phone_number_id}/whatsapp_business_profile?fields=profile_picture_url`;
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${numero.access_token}` } });
+    const fotoUrl = r.data?.data?.[0]?.profile_picture_url || null;
+    if (!fotoUrl) {
+      console.log(`⚠ syncFotoPerfil: WhatsApp não tem foto de perfil pra ${numero.nome}`);
+      return null;
+    }
+    await supabase
+      .from('whatsapp_numbers')
+      .update({ avatar_url: fotoUrl, avatar_synced_at: new Date() })
+      .eq('id', whatsappNumberUuid);
+    console.log(`✓ Foto de perfil sincronizada pra ${numero.nome}`);
+    return fotoUrl;
+  } catch (e) {
+    const msg = e.response?.data?.error?.message || e.message;
+    console.error(`⚠ syncFotoPerfil falhou pra ${whatsappNumberUuid}: ${msg}`);
     return null;
   }
 }
@@ -1429,6 +1475,8 @@ app.post('/api/whatsapp-numbers', async (req, res) => {
       .single();
     if (error) return res.status(500).json({ ok: false, error: error.message });
     invalidarCacheWpp();
+    // Sync foto de perfil em background (não bloqueia a resposta)
+    if (data?.id) syncFotoPerfil(data.id).catch(e => console.error('sync foto bg:', e.message));
     res.json({ ok: true, data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -1501,6 +1549,98 @@ app.post('/api/whatsapp-numbers/:id/test', async (req, res) => {
   } catch (err) {
     const msg = err.response?.data?.error?.message || err.message;
     res.status(400).json({ ok: false, error: msg });
+  }
+});
+
+// Upload de foto de perfil pra um número WhatsApp Business específico.
+// Aceita imagem multipart, envia pra Meta API e atualiza avatar_url no banco.
+app.post('/api/whatsapp-numbers/:id/profile-picture', uploadProfilePic.single('image'), async (req, res) => {
+  try {
+    if (!META_APP_ID) return res.status(500).json({ ok: false, error: 'META_APP_ID não configurado no Railway' });
+    if (!req.file) return res.status(400).json({ ok: false, error: 'Nenhuma imagem enviada' });
+
+    const { data: numero } = await supabase
+      .from('whatsapp_numbers')
+      .select('id, phone_number_id, access_token, nome')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (!numero) return res.status(404).json({ ok: false, error: 'Número não encontrado' });
+    if (!numero.phone_number_id || !numero.access_token) {
+      return res.status(400).json({ ok: false, error: 'Número sem credenciais (phone_number_id ou token)' });
+    }
+
+    const fileSize = req.file.size;
+    const fileType = req.file.mimetype;
+    const fileBuffer = req.file.buffer;
+    console.log(`📷 Upload foto pra ${numero.nome}: ${(fileSize / 1024).toFixed(1)}KB`);
+
+    // 1. Cria sessão de upload no app
+    const sessionUrl = `https://graph.facebook.com/v22.0/${META_APP_ID}/uploads?file_length=${fileSize}&file_type=${encodeURIComponent(fileType)}&access_token=${numero.access_token}`;
+    const sessionRes = await axios.post(sessionUrl);
+    const uploadSessionId = sessionRes.data.id;
+    if (!uploadSessionId) throw new Error('Falha ao criar sessão de upload');
+
+    // 2. Faz upload do binário
+    const uploadRes = await axios.post(
+      `https://graph.facebook.com/v22.0/${uploadSessionId}`,
+      fileBuffer,
+      {
+        headers: { 'Authorization': `OAuth ${numero.access_token}`, 'file_offset': 0, 'Content-Type': fileType },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      }
+    );
+    const fileHandle = uploadRes.data.h;
+    if (!fileHandle) throw new Error('Falha ao receber handle do arquivo');
+
+    // 3. Aplica como foto de perfil do número
+    await axios.post(
+      `https://graph.facebook.com/v22.0/${numero.phone_number_id}/whatsapp_business_profile`,
+      { messaging_product: 'whatsapp', profile_picture_handle: fileHandle },
+      { headers: { Authorization: `Bearer ${numero.access_token}`, 'Content-Type': 'application/json' } }
+    );
+
+    console.log(`✅ Foto de perfil atualizada pro número ${numero.nome}`);
+
+    // 4. Resync foto no banco (espera 2s pra Meta processar)
+    setTimeout(() => syncFotoPerfil(numero.id).catch(() => {}), 2000);
+
+    res.json({ ok: true, message: `Foto atualizada pra ${numero.nome}` });
+  } catch (err) {
+    console.error('Erro upload foto:', err.response?.data || err.message);
+    const msg = err.response?.data?.error?.message || err.message;
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+// Força resync da foto de perfil de um número específico (puxa da Meta de novo)
+app.post('/api/whatsapp-numbers/:id/sync-foto', async (req, res) => {
+  try {
+    const fotoUrl = await syncFotoPerfil(req.params.id);
+    if (!fotoUrl) {
+      return res.status(404).json({ ok: false, error: 'Não foi possível obter a foto (verifique se o número tem foto cadastrada no WhatsApp Business e se as credenciais estão corretas)' });
+    }
+    res.json({ ok: true, avatar_url: fotoUrl });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Resync de todas as fotos de uma vez (útil pra atualizar tudo)
+app.post('/api/whatsapp-numbers/sync-todas-fotos', async (req, res) => {
+  try {
+    const { data: numeros } = await supabase
+      .from('whatsapp_numbers')
+      .select('id, nome')
+      .eq('ativo', true);
+    const resultados = [];
+    for (const n of (numeros || [])) {
+      const url = await syncFotoPerfil(n.id);
+      resultados.push({ nome: n.nome, ok: !!url, avatar_url: url });
+    }
+    res.json({ ok: true, total: resultados.length, resultados });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
