@@ -1440,6 +1440,51 @@ app.post('/api/whatsapp-numbers/:id/test', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
+// API DE WABAs (WhatsApp Business Accounts)
+// Lista as WABAs cadastradas com seus números agrupados.
+// Usado pela tela de Canais do CRM.
+// ════════════════════════════════════════════════════════════════
+app.get('/api/wabas', async (req, res) => {
+  try {
+    // 1. Busca todas as WABAs ativas
+    const { data: wabas, error: errWabas } = await supabase
+      .from('wabas')
+      .select('id, waba_id, business_id, apelido, status, ultima_sincronizacao, ultimo_erro, created_at, empresa_id')
+      .eq('status', 'active')
+      .order('created_at', { ascending: true });
+    if (errWabas) return res.status(500).json({ ok: false, error: errWabas.message });
+
+    // 2. Busca todos os números ativos vinculados a essas WABAs
+    const { data: numeros, error: errNum } = await supabase
+      .from('whatsapp_numbers')
+      .select('id, waba_id_fk, nome, display_phone, phone_number_id, verified_name, avatar_url, avatar_synced_at, qualidade, tier, code_verification_status, daily_limit, ativo, notas, empresa_id')
+      .eq('ativo', true)
+      .order('created_at', { ascending: true });
+    if (errNum) return res.status(500).json({ ok: false, error: errNum.message });
+
+    // 3. Agrupa números por WABA
+    const result = (wabas || []).map(w => ({
+      id: w.id,
+      waba_id: w.waba_id,
+      business_id: w.business_id,
+      apelido: w.apelido,
+      status: w.status,
+      ultima_sincronizacao: w.ultima_sincronizacao,
+      ultimo_erro: w.ultimo_erro,
+      empresa_id: w.empresa_id,
+      created_at: w.created_at,
+      numeros: (numeros || []).filter(n => n.waba_id_fk === w.id)
+    }));
+
+    // 4. Inclui números órfãos (sem WABA ligada) num grupo separado, pra visibilidade
+    const orfaos = (numeros || []).filter(n => !n.waba_id_fk);
+    res.json({ ok: true, data: result, orfaos });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
 // API DE TEMPLATES META
 // ════════════════════════════════════════════════════════════════
 app.get('/api/templates', async (req, res) => {
