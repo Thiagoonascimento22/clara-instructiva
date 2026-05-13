@@ -1655,6 +1655,218 @@ app.post('/api/whatsapp-numbers/sync-todas-fotos', async (req, res) => {
 // dos webhooks dela. Sem isso, mensagens recebidas naquela WABA não
 // chegam ao Forge Sales.
 // Uso: GET /api/wabas/subscribe-app?waba_id=26924247627200296
+// Sincroniza os números de uma WABA já cadastrada — busca na Meta e adiciona faltantes.
+// Útil quando alguém adicionou um número novo na Meta e quer trazer pra Forge Sales.
+app.post('/api/wabas/:uuid/sync-numeros', async (req, res) => {
+  try {
+    const { data: waba } = await supabase
+      .from('wabas')
+      .select('id, waba_id, access_token, apelido, empresa_id')
+      .eq('id', req.params.uuid)
+      .maybeSingle();
+    if (!waba) return res.status(404).json({ ok: false, error: 'WABA não encontrada' });
+    if (!waba.access_token) return res.status(400).json({ ok: false, error: 'WABA sem access_token' });
+
+    // Busca números atuais da WABA na Meta
+    let numerosMeta = [];
+    try {
+      const r = await axios.get(
+        `https://graph.facebook.com/v22.0/${waba.waba_id}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating,code_verification_status,messaging_limit_tier`,
+        { headers: { Authorization: `Bearer ${waba.access_token}` } }
+      );
+      numerosMeta = r.data?.data || [];
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      return res.status(500).json({ ok: false, error: `Erro buscando números na Meta: ${msg}` });
+    }
+
+    const tierToQualidade = (q) => q === 'GREEN' ? 'alta' : q === 'YELLOW' ? 'media' : q === 'RED' ? 'baixa' : null;
+    const tierLimit = (t) => ({ TIER_50: 50, TIER_250: 250, TIER_1K: 1000, TIER_10K: 10000, TIER_100K: 100000 })[t] || null;
+
+    const importados = [];
+    const atualizados = [];
+    for (const n of numerosMeta) {
+      const displayPhone = (n.display_phone_number || '').replace(/\D/g, '');
+      const { data: jaExiste } = await supabase
+        .from('whatsapp_numbers')
+        .select('id, nome')
+        .eq('phone_number_id', n.id)
+        .maybeSingle();
+
+      if (jaExiste) {
+        await supabase.from('whatsapp_numbers')
+          .update({
+            waba_id_fk: waba.id,
+            verified_name: n.verified_name || null,
+            qualidade: tierToQualidade(n.quality_rating),
+            tier: tierLimit(n.messaging_limit_tier),
+            code_verification_status: n.code_verification_status || null
+          })
+          .eq('id', jaExiste.id);
+        syncFotoPerfil(jaExiste.id).catch(() => {});
+        atualizados.push({ nome: jaExiste.nome });
+        continue;
+      }
+      const nomeSugerido = n.verified_name || `${waba.apelido} - ${n.display_phone_number || n.id}`;
+      const { data: novo } = await supabase
+        .from('whatsapp_numbers')
+        .insert({
+          nome: nomeSugerido,
+          display_phone: displayPhone,
+          phone_number_id: n.id,
+          access_token: waba.access_token,
+          whatsapp_business_id: waba.waba_id,
+          waba_id_fk: waba.id,
+          verified_name: n.verified_name || null,
+          qualidade: tierToQualidade(n.quality_rating),
+          tier: tierLimit(n.messaging_limit_tier),
+          code_verification_status: n.code_verification_status || null,
+          empresa_id: waba.empresa_id || null,
+          ativo: true
+        })
+        .select('id, nome')
+        .single();
+      if (novo) {
+        syncFotoPerfil(novo.id).catch(() => {});
+        importados.push({ nome: novo.nome });
+      }
+    }
+    await supabase.from('wabas').update({ ultima_sincronizacao: new Date() }).eq('id', waba.id);
+    invalidarCacheWpp();
+
+    res.json({
+      ok: true,
+      message: `${importados.length} novo(s), ${atualizados.length} atualizado(s).`,
+      importados,
+      atualizados
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Cadastra uma WABA nova e importa todos os números dela automaticamente.
+// Recebe: apelido, waba_id, business_id (opcional), access_token, empresa_id (opcional).
+// Faz: valida token na Meta, cria WABA, busca números, cria registros em whatsapp_numbers, sync fotos.
+app.post('/api/wabas', async (req, res) => {
+  try {
+    const { apelido, waba_id, business_id, access_token, empresa_id } = req.body;
+    if (!waba_id || !access_token || !apelido) {
+      return res.status(400).json({ ok: false, error: 'Campos obrigatórios: apelido, waba_id, access_token' });
+    }
+
+    // 1. Valida com a Meta — confere se o token tem acesso àquela WABA
+    let metaWabaName = null;
+    try {
+      const r = await axios.get(`https://graph.facebook.com/v22.0/${waba_id}?fields=id,name`, {
+        headers: { Authorization: `Bearer ${access_token}` }
+      });
+      metaWabaName = r.data?.name || null;
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      return res.status(400).json({ ok: false, error: `Validação falhou na Meta: ${msg}` });
+    }
+
+    // 2. Cria/recupera WABA no banco (já faz auto-subscribe internamente)
+    const wabaUuid = await ensureWabaExists(waba_id, access_token, empresa_id || null, apelido);
+    if (!wabaUuid) {
+      return res.status(500).json({ ok: false, error: 'Falha ao criar WABA no banco' });
+    }
+
+    // 2b. Atualiza apelido e business_id (caso a WABA já existisse com apelido genérico)
+    const updateWaba = { apelido };
+    if (business_id) updateWaba.business_id = business_id;
+    updateWaba.ultima_sincronizacao = new Date();
+    await supabase.from('wabas').update(updateWaba).eq('id', wabaUuid);
+
+    // 3. Busca números dessa WABA na Meta API
+    let numerosMeta = [];
+    try {
+      const r = await axios.get(
+        `https://graph.facebook.com/v22.0/${waba_id}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating,code_verification_status,messaging_limit_tier`,
+        { headers: { Authorization: `Bearer ${access_token}` } }
+      );
+      numerosMeta = r.data?.data || [];
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.error(`Erro buscando phone_numbers da WABA ${waba_id}: ${msg}`);
+    }
+
+    // 4. Cria/atualiza cada número em whatsapp_numbers
+    const importados = [];
+    const ignorados = [];
+    for (const n of numerosMeta) {
+      const tierToQualidade = (q) => q === 'GREEN' ? 'alta' : q === 'YELLOW' ? 'media' : q === 'RED' ? 'baixa' : null;
+      const tierLimit = (t) => ({ TIER_50: 50, TIER_250: 250, TIER_1K: 1000, TIER_10K: 10000, TIER_100K: 100000 })[t] || null;
+      const displayPhone = (n.display_phone_number || '').replace(/\D/g, ''); // só dígitos
+
+      // Verifica se já existe pelo phone_number_id
+      const { data: jaExiste } = await supabase
+        .from('whatsapp_numbers')
+        .select('id, nome')
+        .eq('phone_number_id', n.id)
+        .maybeSingle();
+
+      if (jaExiste) {
+        // Atualiza vínculo e metadados
+        await supabase.from('whatsapp_numbers')
+          .update({
+            waba_id_fk: wabaUuid,
+            verified_name: n.verified_name || null,
+            qualidade: tierToQualidade(n.quality_rating),
+            tier: tierLimit(n.messaging_limit_tier),
+            code_verification_status: n.code_verification_status || null
+          })
+          .eq('id', jaExiste.id);
+        // Sync foto em background
+        syncFotoPerfil(jaExiste.id).catch(() => {});
+        ignorados.push({ nome: jaExiste.nome, motivo: 'Já existia — atualizado', phone_number_id: n.id });
+        continue;
+      }
+
+      // Cria número novo
+      const nomeSugerido = n.verified_name || `${apelido} - ${n.display_phone_number || n.id}`;
+      const { data: novo, error: errNum } = await supabase
+        .from('whatsapp_numbers')
+        .insert({
+          nome: nomeSugerido,
+          display_phone: displayPhone,
+          phone_number_id: n.id,
+          access_token,
+          whatsapp_business_id: waba_id,
+          waba_id_fk: wabaUuid,
+          verified_name: n.verified_name || null,
+          qualidade: tierToQualidade(n.quality_rating),
+          tier: tierLimit(n.messaging_limit_tier),
+          code_verification_status: n.code_verification_status || null,
+          empresa_id: empresa_id || null,
+          ativo: true
+        })
+        .select('id, nome')
+        .single();
+      if (errNum) {
+        ignorados.push({ phone_number_id: n.id, motivo: errNum.message });
+        continue;
+      }
+      // Sync foto em background
+      syncFotoPerfil(novo.id).catch(() => {});
+      importados.push({ id: novo.id, nome: novo.nome, phone_number_id: n.id });
+    }
+    invalidarCacheWpp();
+
+    res.json({
+      ok: true,
+      message: `WABA "${apelido}" cadastrada. ${importados.length} número(s) importado(s), ${ignorados.length} já existia(m).`,
+      waba: { id: wabaUuid, waba_id, apelido, meta_name: metaWabaName },
+      importados,
+      ignorados
+    });
+  } catch (err) {
+    console.error('POST /api/wabas erro:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/wabas/subscribe-app', async (req, res) => {
   try {
     const wabaIdMeta = req.query.waba_id;
