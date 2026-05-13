@@ -64,11 +64,11 @@ async function getCredsByPhoneNumberId(phoneNumberId) {
   try {
     const { data } = await supabase
       .from('whatsapp_numbers')
-      .select('id, phone_number_id, access_token, nome, whatsapp_business_id')
+      .select('id, phone_number_id, access_token, nome, whatsapp_business_id, ia_ativa')
       .eq('phone_number_id', phoneNumberId)
       .eq('ativo', true)
       .maybeSingle();
-    const creds = data ? { id: data.id, phone_number_id: data.phone_number_id, access_token: data.access_token, nome: data.nome, whatsapp_business_id: data.whatsapp_business_id } : null;
+    const creds = data ? { id: data.id, phone_number_id: data.phone_number_id, access_token: data.access_token, nome: data.nome, whatsapp_business_id: data.whatsapp_business_id, ia_ativa: data.ia_ativa !== false } : null;
     wppCredsCache.set(key, { creds, at: Date.now() });
     return creds;
   } catch (e) {
@@ -821,6 +821,11 @@ app.post('/webhook', async (req, res) => {
       const reg = await getCredsByPhoneNumberId(recebidoEm);
       if (reg) {
         whatsappNumberId = reg.id;
+        // Se a IA tá desativada nesse número (uso manual do time interno), ignora
+        if (reg.ia_ativa === false) {
+          console.log(`🤖 IA desativada pro número "${reg.nome}" (${recebidoEm}) — msg ignorada (uso manual do time)`);
+          return;
+        }
       } else if (recebidoEm !== PHONE_NUMBER_ID) {
         // Não tá cadastrado E não é o número do env var → ignora
         console.log(`Ignorado: msg veio pro número ${recebidoEm} (não cadastrado em whatsapp_numbers)`);
@@ -1486,7 +1491,7 @@ app.post('/api/whatsapp-numbers', async (req, res) => {
 // Atualiza número (incluindo trocar token)
 app.patch('/api/whatsapp-numbers/:id', async (req, res) => {
   try {
-    const allowed = ['nome', 'display_phone', 'phone_number_id', 'access_token', 'whatsapp_business_id', 'qualidade', 'tier', 'ativo', 'notas'];
+    const allowed = ['nome', 'display_phone', 'phone_number_id', 'access_token', 'whatsapp_business_id', 'qualidade', 'tier', 'ativo', 'ia_ativa', 'notas'];
     const updateData = {};
     for (const k of allowed) if (req.body[k] !== undefined) updateData[k] = req.body[k];
     if (!Object.keys(updateData).length) return res.status(400).json({ ok: false, error: 'Nada pra atualizar' });
@@ -1549,6 +1554,25 @@ app.post('/api/whatsapp-numbers/:id/test', async (req, res) => {
   } catch (err) {
     const msg = err.response?.data?.error?.message || err.message;
     res.status(400).json({ ok: false, error: msg });
+  }
+});
+
+// Toggle rápido de IA ativa/inativa pra um número (pra UI)
+app.post('/api/whatsapp-numbers/:id/toggle-ia', async (req, res) => {
+  try {
+    const { data: atual } = await supabase
+      .from('whatsapp_numbers')
+      .select('id, nome, ia_ativa')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (!atual) return res.status(404).json({ ok: false, error: 'Número não encontrado' });
+    const novo = atual.ia_ativa === false ? true : false;
+    const { error } = await supabase.from('whatsapp_numbers').update({ ia_ativa: novo }).eq('id', req.params.id);
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    invalidarCacheWpp();
+    res.json({ ok: true, ia_ativa: novo, message: `IA ${novo ? 'ativada' : 'desativada'} pra "${atual.nome}"` });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -1904,7 +1928,7 @@ app.get('/api/wabas', async (req, res) => {
     // 2. Busca todos os números ativos vinculados a essas WABAs
     const { data: numeros, error: errNum } = await supabase
       .from('whatsapp_numbers')
-      .select('id, waba_id_fk, nome, display_phone, phone_number_id, verified_name, avatar_url, avatar_synced_at, qualidade, tier, code_verification_status, daily_limit, ativo, notas, empresa_id')
+      .select('id, waba_id_fk, nome, display_phone, phone_number_id, verified_name, avatar_url, avatar_synced_at, qualidade, tier, code_verification_status, daily_limit, ativo, ia_ativa, notas, empresa_id')
       .eq('ativo', true)
       .order('created_at', { ascending: true });
     if (errNum) return res.status(500).json({ ok: false, error: errNum.message });
