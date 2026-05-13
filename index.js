@@ -260,23 +260,33 @@ async function getOrCreateLead(phone, name = null) {
   return lead;
 }
 
-async function getOrCreateConversa(leadId) {
-  const { data: conversas } = await supabase
+async function getOrCreateConversa(leadId, whatsappNumberId = null) {
+  // Se whatsappNumberId foi passado, filtra também por ele → cada (lead × número) vira conversa isolada.
+  // Sem isso, leads que já falaram com a empresa em OUTRO número receberiam contexto antigo.
+  let query = supabase
     .from('conversas')
     .select('*')
     .eq('lead_id', leadId)
     .eq('status', 'aberta')
-    .eq('arquivada', false)
-    .order('updated_at', { ascending: false })
-    .limit(1);
+    .eq('arquivada', false);
+
+  if (whatsappNumberId) {
+    query = query.eq('whatsapp_number_id', whatsappNumberId);
+  }
+
+  const { data: conversas } = await query.order('updated_at', { ascending: false }).limit(1);
 
   if (conversas && conversas.length > 0) {
     return conversas[0];
   }
 
+  // Não achou conversa nesse canal → cria nova (com whatsapp_number_id se foi passado)
+  const insertData = { lead_id: leadId, channel: 'whatsapp', status: 'aberta', arquivada: false };
+  if (whatsappNumberId) insertData.whatsapp_number_id = whatsappNumberId;
+
   const { data: nova } = await supabase
     .from('conversas')
-    .insert({ lead_id: leadId, channel: 'whatsapp', status: 'aberta', arquivada: false })
+    .insert(insertData)
     .select()
     .single();
   return nova;
@@ -867,7 +877,7 @@ app.post('/webhook', async (req, res) => {
 // como mensagem com media_url. NÃO faz IA responder (pra Clara não
 // tentar responder algo que não entendeu).
 // ════════════════════════════════════════════════════════════════
-async function processarMidiaRecebida(from, message, profileName) {
+async function processarMidiaRecebida(from, message, profileName, whatsappNumberId = null) {
   try {
     const msgType = message.type;
     const mediaObj = message[msgType];
@@ -892,7 +902,7 @@ async function processarMidiaRecebida(from, message, profileName) {
     // 2. Salva info no banco (sem baixar o arquivo - usuário não pediu storage)
     // O frontend vai fazer fetch direto via endpoint proxy quando precisar exibir
     const lead = await getOrCreateLead(from, profileName);
-    const conversa = await getOrCreateConversa(lead.id);
+    const conversa = await getOrCreateConversa(lead.id, whatsappNumberId);
 
     const filename = mediaObj.filename || `${msgType}_${Date.now()}`;
     const caption = message[msgType]?.caption || '';
@@ -1004,7 +1014,7 @@ async function processarBufferDoLead(from) {
     console.log(`[BUFFER] Processando ${messages.length} msg(s) de ${from}`);
 
     const lead = await getOrCreateLead(from, profileName);
-    const conversa = await getOrCreateConversa(lead.id);
+    const conversa = await getOrCreateConversa(lead.id, whatsappNumberId);
 
     // === MULTI-NUMBER: associa conversa ao número que recebeu (se ainda não tiver) ===
     if (whatsappNumberId && !conversa.whatsapp_number_id) {
@@ -1765,7 +1775,7 @@ async function dispararCampanhaInterno(campanhaId) {
       try {
         const lead = await getOrCreateLead(envio.phone, envio.nome);
 
-        const conversa = await getOrCreateConversa(lead.id);
+        const conversa = await getOrCreateConversa(lead.id, credsCampanha?.id || null);
         const podeSobrescrever = await deveSobrescreverCampanha(conversa.id);
         if (!conversa.campanha_id || podeSobrescrever) {
           await supabase
