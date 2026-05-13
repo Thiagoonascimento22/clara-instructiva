@@ -1364,16 +1364,58 @@ app.get('/api/whatsapp-numbers', async (req, res) => {
 });
 
 // Cria novo número
+// Função auxiliar: garante que a WABA existe no banco. 
+// Se já existe, retorna o id. Se não, cria.
+async function ensureWabaExists(whatsapp_business_id, access_token, empresa_id, apelidoSugerido) {
+  if (!whatsapp_business_id) return null;
+  try {
+    // Procura WABA existente
+    const { data: existente } = await supabase
+      .from('wabas')
+      .select('id')
+      .eq('waba_id', whatsapp_business_id)
+      .maybeSingle();
+    if (existente?.id) return existente.id;
+
+    // Não existe — cria uma nova
+    const apelido = apelidoSugerido || `WABA ${String(whatsapp_business_id).slice(0, 8)}...`;
+    const { data: nova, error } = await supabase
+      .from('wabas')
+      .insert({
+        waba_id: whatsapp_business_id,
+        apelido,
+        access_token: access_token || '',
+        empresa_id: empresa_id || null,
+        status: 'active'
+      })
+      .select('id')
+      .single();
+    if (error) {
+      console.error('ensureWabaExists erro ao criar WABA:', error.message);
+      return null;
+    }
+    console.log(`✓ WABA criada automaticamente: ${apelido} (${whatsapp_business_id})`);
+    return nova.id;
+  } catch (e) {
+    console.error('ensureWabaExists erro:', e.message);
+    return null;
+  }
+}
+
 app.post('/api/whatsapp-numbers', async (req, res) => {
   try {
     const { nome, display_phone, phone_number_id, access_token, whatsapp_business_id, qualidade, tier, notas, empresa_id } = req.body;
     if (!nome || !phone_number_id || !access_token) {
       return res.status(400).json({ ok: false, error: 'Campos obrigatórios: nome, phone_number_id, access_token' });
     }
+
+    // Garante que a WABA existe (cria se não existir) e pega o id pra vincular
+    const waba_id_fk = await ensureWabaExists(whatsapp_business_id, access_token, empresa_id, nome);
+
     const { data, error } = await supabase
       .from('whatsapp_numbers')
-      .insert({ nome, display_phone, phone_number_id, access_token, whatsapp_business_id, qualidade, tier, notas, empresa_id, ativo: true })
-      .select('id, nome, display_phone, phone_number_id, whatsapp_business_id, qualidade, tier, ativo, notas')
+      .insert({ nome, display_phone, phone_number_id, access_token, whatsapp_business_id, waba_id_fk, qualidade, tier, notas, empresa_id, ativo: true })
+      .select('id, nome, display_phone, phone_number_id, whatsapp_business_id, waba_id_fk, qualidade, tier, ativo, notas')
       .single();
     if (error) return res.status(500).json({ ok: false, error: error.message });
     invalidarCacheWpp();
@@ -1391,11 +1433,24 @@ app.patch('/api/whatsapp-numbers/:id', async (req, res) => {
     for (const k of allowed) if (req.body[k] !== undefined) updateData[k] = req.body[k];
     if (!Object.keys(updateData).length) return res.status(400).json({ ok: false, error: 'Nada pra atualizar' });
 
+    // Se mudou o whatsapp_business_id, atualiza tb o vínculo waba_id_fk
+    if (updateData.whatsapp_business_id !== undefined) {
+      const { data: numAtual } = await supabase
+        .from('whatsapp_numbers')
+        .select('access_token, nome, empresa_id')
+        .eq('id', req.params.id)
+        .maybeSingle();
+      const tokenPraWaba = updateData.access_token || numAtual?.access_token || '';
+      const nomePraWaba = updateData.nome || numAtual?.nome;
+      const empresaPraWaba = numAtual?.empresa_id;
+      updateData.waba_id_fk = await ensureWabaExists(updateData.whatsapp_business_id, tokenPraWaba, empresaPraWaba, nomePraWaba);
+    }
+
     const { data, error } = await supabase
       .from('whatsapp_numbers')
       .update(updateData)
       .eq('id', req.params.id)
-      .select('id, nome, display_phone, phone_number_id, whatsapp_business_id, qualidade, tier, ativo, notas')
+      .select('id, nome, display_phone, phone_number_id, whatsapp_business_id, waba_id_fk, qualidade, tier, ativo, notas')
       .single();
     if (error) return res.status(500).json({ ok: false, error: error.message });
     invalidarCacheWpp();
