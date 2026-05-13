@@ -1499,6 +1499,36 @@ app.post('/api/whatsapp-numbers/:id/test', async (req, res) => {
 // Lista as WABAs cadastradas com seus números agrupados.
 // Usado pela tela de Canais do CRM.
 // ════════════════════════════════════════════════════════════════
+
+// Subscribe app aos eventos de uma WABA específica.
+// Use uma vez por WABA recém-cadastrada — registra o app como ouvinte
+// dos webhooks dela. Sem isso, mensagens recebidas naquela WABA não
+// chegam ao Forge Sales.
+// Uso: GET /api/wabas/subscribe-app?waba_id=26924247627200296
+app.get('/api/wabas/subscribe-app', async (req, res) => {
+  try {
+    const wabaIdMeta = req.query.waba_id;
+    if (!wabaIdMeta) {
+      return res.status(400).json({ ok: false, error: 'Parâmetro ?waba_id=xxx é obrigatório' });
+    }
+    const { data: waba, error: errWaba } = await supabase
+      .from('wabas')
+      .select('id, waba_id, access_token, apelido')
+      .eq('waba_id', wabaIdMeta)
+      .maybeSingle();
+    if (errWaba) return res.status(500).json({ ok: false, error: errWaba.message });
+    if (!waba) return res.status(404).json({ ok: false, error: `WABA ${wabaIdMeta} não encontrada no banco. Cadastre primeiro.` });
+    if (!waba.access_token) return res.status(400).json({ ok: false, error: 'WABA sem access_token cadastrado' });
+
+    const url = `https://graph.facebook.com/v22.0/${waba.waba_id}/subscribed_apps`;
+    const r = await axios.post(url, {}, { headers: { Authorization: `Bearer ${waba.access_token}` } });
+    res.json({ ok: true, message: `✓ App registrado à WABA "${waba.apelido}" (${waba.waba_id}). Agora as mensagens devem chegar.`, data: r.data });
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.message;
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
 app.get('/api/wabas', async (req, res) => {
   try {
     // 1. Busca todas as WABAs ativas
