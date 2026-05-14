@@ -530,7 +530,26 @@ async function askClara(userMessage, historico = [], agente = null, nomeLead = n
     ? `\n\n═══ NOME REAL DO LEAD: ${nomeFirst} ═══\nVocê PODE usar esse nome real ao se dirigir ao lead (em momentos de conexão, sem exagerar). REGRA ABSOLUTA: NUNCA escreva placeholders como [nome], [Nome], [primeiro nome], [Lead Name], [Nome do Lead] ou QUALQUER texto entre colchetes. Se for usar nome, é o REAL acima. Se preferir não usar nome, simplesmente não use.`
     : `\n\n═══ NOME REAL DO LEAD: desconhecido ═══\nNão sabemos o nome real do lead ainda. REGRA ABSOLUTA: NUNCA escreva placeholders como [nome], [Nome], [primeiro nome], [Lead Name], [Nome do Lead] ou QUALQUER texto entre colchetes. Faça a mensagem SEM nome.`;
 
-  const systemPrompt = promptBase + baseConhecimento + regraNome;
+  // Contexto temporal: data/hora atual em Brasília pra Clara adaptar saudações e encerramentos
+  const agora = new Date();
+  const dataBrasilia = agora.toLocaleString('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const horaBrasilia = parseInt(new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    hour: '2-digit',
+    hour12: false,
+  }).format(agora), 10);
+  const periodo = horaBrasilia < 12 ? 'manhã' : horaBrasilia < 18 ? 'tarde' : 'noite';
+  const contextoTemporal = `\n\n═══ DATA E HORA ATUAL ═══\nAgora é ${dataBrasilia} (horário de Brasília). Você está conversando durante a ${periodo}.\n- Saudações (quando fizer sentido): "Bom dia" (até 12h), "Boa tarde" (12h-18h), "Boa noite" (após 18h)\n- Encerramentos: "Tenha um ótimo dia" (manhã/tarde até 18h), "Tenha uma boa noite" (após 18h)\n- Use bom senso: não fale "vai dormir bem" às 9h da manhã, não fale "tenha um bom começo de dia" às 23h`;
+
+  const systemPrompt = promptBase + baseConhecimento + contextoTemporal + regraNome;
 
   // Multi-provider: usa Gemini, GPT ou Claude baseado em env var AI_PROVIDER
   const resultado = await gerarRespostaIA(systemPrompt, historico, userMessage);
@@ -1199,6 +1218,19 @@ async function processarBufferDoLead(from) {
 
     if (conversa.ia_active === false) {
       console.log(`Clara pausada na conversa ${conversa.id} — humano assumiu, não respondendo`);
+      return;
+    }
+
+    // HORÁRIO COMERCIAL: Clara NÃO responde entre 00:00 e 05:00 (Brasília)
+    // A mensagem do lead JÁ FOI SALVA acima — quando ele mandar mensagem depois das 5h, a Clara responde
+    const horaBrasilia = parseInt(new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      hour: '2-digit',
+      hour12: false,
+    }).format(new Date()), 10);
+
+    if (horaBrasilia >= 0 && horaBrasilia < 5) {
+      console.log(`🌙 [HORÁRIO] Mensagem recebida às ${horaBrasilia}h (Brasília) — Clara silenciosa entre 00h-05h. Mensagem salva, responde pela manhã.`);
       return;
     }
 
