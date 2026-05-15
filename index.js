@@ -3399,4 +3399,131 @@ app.post('/api/pipeline/reclassificar-tudo', async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════════
+// INJEÇÃO PROATIVA DE OFERTA EM CONVERSAS ENGAJADAS
+// Pra "leads quentes" que estão em conversa ativa nas últimas 24h.
+// Clara lê o histórico, identifica o estágio e injeta a oferta de forma natural.
+// ════════════════════════════════════════════════════════════════
+// POST /api/clara/injetar-oferta-engajados
+// Body: { phones: ["55...", ...], oferta_label: "R$ 400 de desconto" (opcional), dry_run: false }
+// Pra cada phone: busca lead, conversa ativa, histórico, gera mensagem contextual e envia.
+app.post('/api/clara/injetar-oferta-engajados', async (req, res) => {
+  try {
+    const { phones, oferta_label = 'R$ 400 de desconto', dry_run = false } = req.body;
+    if (!Array.isArray(phones) || !phones.length) {
+      return res.status(400).json({ ok: false, error: 'Campo "phones" obrigatório (array de telefones com 55+DDD+9 dígitos)' });
+    }
+
+    const resultados = { total: phones.length, enviados: 0, ignorados: [], erros: [], previews: [] };
+
+    for (const phone of phones) {
+      try {
+        // 1. Busca lead pelo telefone (aceita com ou sem +)
+        const phoneClean = phone.replace(/\D/g, '');
+        const { data: leadsMatch } = await supabase
+          .from('leads')
+          .select('id, name, phone, empresa_id')
+          .or(`phone.eq.${phoneClean},phone.eq.+${phoneClean}`)
+          .limit(1);
+        const lead = leadsMatch?.[0];
+        if (!lead) { resultados.ignorados.push({ phone, motivo: 'lead não encontrado' }); continue; }
+
+        // 2. Busca conversa mais recente desse lead
+        const { data: convs } = await supabase
+          .from('conversas')
+          .select('id, ia_active, whatsapp_number_id, campanha_id, arquivada')
+          .eq('lead_id', lead.id)
+          .order('updated_at', { ascending: false })
+          .limit(1);
+        const conversa = convs?.[0];
+        if (!conversa) { resultados.ignorados.push({ phone, motivo: 'conversa não encontrada' }); continue; }
+        if (conversa.ia_active === false) { resultados.ignorados.push({ phone, motivo: 'IA pausada' }); continue; }
+        if (conversa.arquivada) { resultados.ignorados.push({ phone, motivo: 'conversa arquivada' }); continue; }
+
+        // 3. Busca histórico (últimas 20 mensagens, do mais antigo pro mais novo)
+        const { data: msgs } = await supabase
+          .from('mensagens')
+          .select('role, content, created_at')
+          .eq('conversa_id', conversa.id)
+          .order('created_at', { ascending: false })
+          .limit(20);
+        const historico = (msgs || []).reverse().map(m => ({
+          role: m.role === 'user' ? 'user' : 'assistant',
+          content: m.content,
+        }));
+        if (!historico.length) { resultados.ignorados.push({ phone, motivo: 'sem histórico' }); continue; }
+
+        // 4. Busca credenciais do número da Clara (whatsapp_number)
+        if (!conversa.whatsapp_number_id) { resultados.ignorados.push({ phone, motivo: 'sem whatsapp_number_id' }); continue; }
+        const { data: clara } = await supabase
+          .from('whatsapp_numbers')
+          .select('phone_number_id, access_token, nome, waba_id_fk')
+          .eq('id', conversa.whatsapp_number_id)
+          .single();
+        if (!clara) { resultados.ignorados.push({ phone, motivo: 'whatsapp_number não encontrado' }); continue; }
+        let access_token = clara.access_token;
+        if (!access_token && clara.waba_id_fk) {
+          const { data: waba } = await supabase.from('wabas').select('access_token').eq('id', clara.waba_id_fk).single();
+          access_token = waba?.access_token;
+        }
+        if (!access_token) { resultados.ignorados.push({ phone, motivo: 'sem access_token' }); continue; }
+
+        // 5. Busca agente padrão (Clara - Fontes Chaveadas) da empresa do lead
+        const empresaId = lead.empresa_id || '00000000-0000-0000-0000-000000000001';
+        const { data: agente } = await supabase
+          .from('agentes')
+          .select('*')
+          .eq('is_default', true)
+          .eq('ativo', true)
+          .eq('empresa_id', empresaId)
+          .limit(1)
+          .single();
+        if (!agente) { resultados.ignorados.push({ phone, motivo: 'agente padrão não encontrado' }); continue; }
+
+        // 6. Monta instrução interna proativa
+        const instrucaoProativa = `[INSTRUÇÃO INTERNA — AÇÃO PROATIVA]
+
+Você está em uma conversa EM ANDAMENTO com o lead. Sua missão AGORA é:
+
+1. Leia o histórico desta conversa e identifique em que ESTÁGIO o lead está (acabou de abrir, em qualificação, falando do preço, hesitando, etc).
+
+2. Injete a "Condição Especial ${oferta_label}" de forma NATURAL, adaptando a abordagem ao estágio atual da conversa. Use a ABERTURA 3 do PLAYBOOK "Reativação R$ 400" como referência — não cole o texto literal, fale como uma humana faria, conectada ao que vem sendo conversado.
+
+3. NÃO repita o que já foi dito. Seja CURTA e direta. Apenas anuncie a novidade da condição especial, em 1-2 mensagens curtas no máximo.
+
+4. Os números: R$ 1.297 à vista (em vez de R$ 1.697) ou 18x de R$ 93,51 (menos de R$ 100/mês). É limitada e pode encerrar a qualquer momento. NÃO envie o link agora — só envia se o lead pedir.
+
+Gere AGORA a próxima mensagem da Clara nesta conversa, no tom natural dela.`;
+
+        // 7. Chama a Clara
+        const reply = await askClara(instrucaoProativa, historico, agente, lead.name);
+        if (!reply || !reply.trim()) { resultados.ignorados.push({ phone, motivo: 'Clara retornou vazio' }); continue; }
+
+        // 8. Dry-run: só mostra preview, não envia
+        if (dry_run) {
+          resultados.previews.push({ phone, nome: lead.name, preview: reply.slice(0, 300) });
+          continue;
+        }
+
+        // 9. Salva e envia
+        await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
+        await sendWhatsAppMessage(phone, reply, { phone_number_id: clara.phone_number_id, access_token, nome: clara.nome });
+        resultados.enviados++;
+        console.log(`✅ [INJEÇÃO_PROATIVA] enviada para ${phone} (${lead.name})`);
+
+        // 10. Rate limit — 2s entre envios pra não estourar WhatsApp
+        await new Promise(r => setTimeout(r, 2000));
+      } catch (err) {
+        console.error(`❌ [INJEÇÃO_PROATIVA] erro em ${phone}:`, err.message);
+        resultados.erros.push({ phone, motivo: err.message });
+      }
+    }
+
+    res.json({ ok: true, dry_run, ...resultados });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+
 app.listen(PORT, () => console.log(`Clara v3 rodando na porta ${PORT}`));
