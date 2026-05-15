@@ -489,12 +489,13 @@ async function salvarGastoIA(provider, inputTokens, outputTokens, model = null) 
     // Acumula gasto diário (se já tem registro hoje, soma; senão cria)
     const { data: existing } = await supabase
       .from('gastos')
-      .select('id, valor_brl, valor_usd, tokens_input, tokens_output')
+      .select('id, valor, valor_brl, valor_usd, tokens_input, tokens_output')
       .eq('data', hoje)
       .eq('source', sourceTag)
       .maybeSingle();
     if (existing) {
       await supabase.from('gastos').update({
+        valor: Number(existing.valor || 0) + brlTotal,
         valor_brl: Number(existing.valor_brl || 0) + brlTotal,
         valor_usd: Number(existing.valor_usd || 0) + usdTotal,
         tokens_input: Number(existing.tokens_input || 0) + inputTokens,
@@ -504,9 +505,11 @@ async function salvarGastoIA(provider, inputTokens, outputTokens, model = null) 
       await supabase.from('gastos').insert({
         data: hoje,
         descricao: `${p.label} - ${hoje}`,
+        valor: brlTotal,
         valor_brl: brlTotal,
         valor_usd: usdTotal,
         canal: provider,
+        categoria: 'Tokens IA',
         tokens_input: inputTokens,
         tokens_output: outputTokens,
         source: sourceTag
@@ -1236,6 +1239,24 @@ async function processarBufferDoLead(from) {
 
     const historico = await buscarHistorico(conversa.id);
     const agente = await buscarAgenteAtivo(conversa.id);
+
+    // SINGLE RESPONSE: agente envia 1 msg fixa e pausa IA na conversa
+    if (agente?.single_response && agente?.mensagem_fixa) {
+      const reply = agente.mensagem_fixa;
+      console.log(`📨 [SINGLE_RESPONSE] Agente ${agente.id} (${agente.nome || 'sem nome'}) — enviando msg fixa e pausando IA`);
+
+      if (lastMessageId) await sendTypingIndicator(lastMessageId, creds);
+      const tempoEspera = calcularTempoDigitando(reply);
+      await new Promise(r => setTimeout(r, tempoEspera));
+
+      await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
+      await sendWhatsAppMessage(from, reply, creds);
+
+      // Pausa IA na conversa — atendente humano assume a partir daqui
+      await supabase.from('conversas').update({ ia_active: false }).eq('id', conversa.id);
+      console.log(`🔇 [SINGLE_RESPONSE] IA pausada na conversa ${conversa.id}`);
+      return;
+    }
 
     if (lastMessageId) await sendTypingIndicator(lastMessageId, creds);
 
@@ -2317,13 +2338,15 @@ async function dispararCampanhaInterno(campanhaId) {
     const varCount = await getTemplateVariableCount(campanha.template_name, credsCampanha);
     console.log(`Template ${campanha.template_name} tem ${varCount} variável(eis)`);
 
+    // IMPORTANTE: Supabase tem limit padrão de 1000 rows. Usamos range pra ler tudo (até 50k por campanha).
     const { data: envios } = await supabase
       .from('campanha_envios')
       .select('*')
       .eq('campanha_id', campanhaId)
-      .eq('status', 'pendente');
+      .eq('status', 'pendente')
+      .range(0, 49999);
 
-    console.log(`Disparando campanha ${campanha.nome} para ${envios?.length || 0} leads`);
+    console.log(`Disparando campanha ${campanha.nome} para ${envios?.length || 0} leads pendentes`);
 
     let sucessos = 0, erros = 0;
 
