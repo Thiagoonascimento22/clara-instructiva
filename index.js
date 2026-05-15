@@ -2789,7 +2789,7 @@ async function sincronizarGastosMeta() {
   const { data: wabas } = await supabase
     .from('wabas')
     .select('id, waba_id, access_token, apelido')
-    .eq('status', 'ativo')
+    .eq('status', 'active')
     .range(0, 999);
 
   if (!wabas || !wabas.length) {
