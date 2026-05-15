@@ -2785,7 +2785,16 @@ async function getCotacaoUSDBRL() {
 }
 
 async function sincronizarGastosMeta() {
-  if (!WHATSAPP_TOKEN || !WABA_ID) return { success: false, error: 'Credenciais Meta não configuradas' };
+  // Busca TODAS as WABAs ativas (multi-WABA support)
+  const { data: wabas } = await supabase
+    .from('wabas')
+    .select('id, waba_id, access_token, apelido')
+    .eq('status', 'ativo')
+    .range(0, 999);
+
+  if (!wabas || !wabas.length) {
+    return { success: false, error: 'Nenhuma WABA cadastrada ou ativa' };
+  }
 
   const now = new Date();
   const start = new Date(now);
@@ -2794,51 +2803,67 @@ async function sincronizarGastosMeta() {
   const endTs = Math.floor(now.getTime() / 1000);
   const cotacao = await getCotacaoUSDBRL();
 
-  try {
-    const url = `https://graph.facebook.com/v21.0/${WABA_ID}/pricing_analytics`;
-    const params = { start: startTs, end: endTs, granularity: 'DAILY', access_token: WHATSAPP_TOKEN };
-    const response = await axios.get(url, { params, timeout: 30000 });
-    const data = response.data?.data?.[0]?.data_points || [];
+  let totalInserido = 0, totalAtualizado = 0;
+  const detalhesPorWaba = [];
 
-    if (!data.length) return await sincronizarConversationAnalytics(startTs, endTs, cotacao);
+  for (const waba of wabas) {
+    try {
+      const url = `https://graph.facebook.com/v21.0/${waba.waba_id}/pricing_analytics`;
+      const params = { start: startTs, end: endTs, granularity: 'DAILY', access_token: waba.access_token };
+      const response = await axios.get(url, { params, timeout: 30000 });
+      const data = response.data?.data?.[0]?.data_points || [];
 
-    let totalInserido = 0, totalAtualizado = 0;
+      let inseridoWaba = 0, atualizadoWaba = 0;
 
-    for (const point of data) {
-      const dataDia = new Date((point.start || 0) * 1000).toISOString().slice(0, 10);
-      const custoUSD = parseFloat(point.cost || 0);
-      if (custoUSD <= 0) continue;
-      const custoBRL = custoUSD * cotacao;
-      const tipo = point.pricing_type || point.pricing_category || 'WhatsApp';
-      const categoria = 'Meta WhatsApp';
-      const descricao = `${tipo} - ${dataDia}`;
-
-      const { data: existing } = await supabase
-        .from('gastos')
-        .select('id')
-        .eq('data', dataDia)
-        .eq('categoria', categoria)
-        .eq('source', 'meta_api')
-        .limit(1);
-
-      if (existing && existing.length > 0) {
-        await supabase.from('gastos').update({ valor: custoBRL, descricao, canal: 'whatsapp' }).eq('id', existing[0].id);
-        totalAtualizado++;
+      // Se pricing_analytics vazio, tenta conversation_analytics como fallback
+      if (!data.length) {
+        const fb = await sincronizarConversationAnalytics(waba, startTs, endTs, cotacao);
+        inseridoWaba = fb.inserted || 0;
+        atualizadoWaba = fb.updated || 0;
       } else {
-        await supabase.from('gastos').insert({ valor: custoBRL, descricao, data: dataDia, canal: 'whatsapp', categoria, source: 'meta_api' });
-        totalInserido++;
+        for (const point of data) {
+          const dataDia = new Date((point.start || 0) * 1000).toISOString().slice(0, 10);
+          const custoUSD = parseFloat(point.cost || 0);
+          if (custoUSD <= 0) continue;
+          const custoBRL = custoUSD * cotacao;
+          const tipo = point.pricing_type || point.pricing_category || 'WhatsApp';
+          const categoria = 'Meta WhatsApp';
+          const descricao = `${waba.apelido || waba.waba_id} · ${tipo} - ${dataDia}`;
+
+          const { data: existing } = await supabase
+            .from('gastos')
+            .select('id')
+            .eq('data', dataDia)
+            .eq('categoria', categoria)
+            .eq('source', 'meta_api')
+            .eq('waba_id', waba.waba_id)
+            .limit(1);
+
+          if (existing && existing.length > 0) {
+            await supabase.from('gastos').update({ valor: custoBRL, descricao, canal: 'whatsapp' }).eq('id', existing[0].id);
+            atualizadoWaba++;
+          } else {
+            await supabase.from('gastos').insert({ valor: custoBRL, descricao, data: dataDia, canal: 'whatsapp', categoria, source: 'meta_api', waba_id: waba.waba_id });
+            inseridoWaba++;
+          }
+        }
       }
+
+      totalInserido += inseridoWaba;
+      totalAtualizado += atualizadoWaba;
+      detalhesPorWaba.push({ waba: waba.apelido || waba.waba_id, inserted: inseridoWaba, updated: atualizadoWaba });
+    } catch (err) {
+      detalhesPorWaba.push({ waba: waba.apelido || waba.waba_id, error: err.response?.data?.error?.message || err.message });
     }
-    return { success: true, inserted: totalInserido, updated: totalAtualizado, cotacao };
-  } catch (err) {
-    return { success: false, error: err.response?.data?.error?.message || err.message };
   }
+
+  return { success: true, inserted: totalInserido, updated: totalAtualizado, cotacao, wabas: detalhesPorWaba };
 }
 
-async function sincronizarConversationAnalytics(startTs, endTs, cotacao) {
+async function sincronizarConversationAnalytics(waba, startTs, endTs, cotacao) {
   try {
-    const url = `https://graph.facebook.com/v21.0/${WABA_ID}`;
-    const params = { fields: `conversation_analytics.start(${startTs}).end(${endTs}).granularity(DAILY).phone_numbers([])`, access_token: WHATSAPP_TOKEN };
+    const url = `https://graph.facebook.com/v21.0/${waba.waba_id}`;
+    const params = { fields: `conversation_analytics.start(${startTs}).end(${endTs}).granularity(DAILY).phone_numbers([])`, access_token: waba.access_token };
     const response = await axios.get(url, { params, timeout: 30000 });
     const points = response.data?.conversation_analytics?.data?.[0]?.data_points || [];
     if (!points.length) return { success: true, inserted: 0, updated: 0 };
@@ -2850,15 +2875,15 @@ async function sincronizarConversationAnalytics(startTs, endTs, cotacao) {
       if (custoUSD <= 0) continue;
       const custoBRL = custoUSD * cotacao;
       const categoria = 'Meta WhatsApp';
-      const descricao = `Conversas - ${dataDia}`;
+      const descricao = `${waba.apelido || waba.waba_id} · Conversas - ${dataDia}`;
 
-      const { data: existing } = await supabase.from('gastos').select('id').eq('data', dataDia).eq('categoria', categoria).eq('source', 'meta_api').limit(1);
+      const { data: existing } = await supabase.from('gastos').select('id').eq('data', dataDia).eq('categoria', categoria).eq('source', 'meta_api').eq('waba_id', waba.waba_id).limit(1);
 
       if (existing && existing.length > 0) {
         await supabase.from('gastos').update({ valor: custoBRL, descricao, canal: 'whatsapp' }).eq('id', existing[0].id);
         totalAtualizado++;
       } else {
-        await supabase.from('gastos').insert({ valor: custoBRL, descricao, data: dataDia, canal: 'whatsapp', categoria, source: 'meta_api' });
+        await supabase.from('gastos').insert({ valor: custoBRL, descricao, data: dataDia, canal: 'whatsapp', categoria, source: 'meta_api', waba_id: waba.waba_id });
         totalInserido++;
       }
     }
