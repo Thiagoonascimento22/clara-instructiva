@@ -1261,13 +1261,40 @@ async function processarBufferDoLead(from) {
     if (lastMessageId) await sendTypingIndicator(lastMessageId, creds);
 
     // Manda o texto COMBINADO pro Gemini — assim ela responde considerando todas as msgs juntas
-    const reply = await askClara(textoCombinado, historico, agente, lead?.name);
+    let reply = await askClara(textoCombinado, historico, agente, lead?.name);
+
+    // ── AUTO-PAUSE: detecta marcador na resposta da Clara que sinaliza "pausa IA, humano assume"
+    // Marcadores aceitos: 🟡 ASSUMIR_CONVERSA: <motivo>  |  📞 PASSAR_PARA_HUMANO: <motivo>
+    // Quando detectado: remove o marcador da mensagem antes de enviar, e seta ia_active=false após o envio.
+    const PAUSE_MARKERS = [
+      /\s*🟡\s*ASSUMIR[_\s]CONVERSA\s*:?\s*([A-ZÀ-Ú0-9 _-]+)/i,
+      /\s*📞\s*PASSAR[_\s]PARA[_\s]HUMANO\s*:?\s*([A-ZÀ-Ú0-9 _-]+)/i,
+      /\s*\[PAUSE_IA(?::\s*([A-ZÀ-Ú0-9 _-]+))?\]/i,
+    ];
+    let shouldPauseIA = false;
+    let pauseReason = null;
+    for (const re of PAUSE_MARKERS) {
+      const m = reply.match(re);
+      if (m) {
+        shouldPauseIA = true;
+        pauseReason = (m[1] || 'AUTO').trim().toUpperCase();
+        reply = reply.replace(re, '').replace(/\n{3,}/g, '\n\n').trim();
+        break;
+      }
+    }
+
     const tempoEspera = calcularTempoDigitando(reply);
     console.log(`[BUFFER] Aguardando ${tempoEspera}ms antes de responder`);
     await new Promise(r => setTimeout(r, tempoEspera));
 
     await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
     await sendWhatsAppMessage(from, reply, creds);
+
+    // Auto-pause da IA: Clara sinalizou que precisa de humano (ex: boleto)
+    if (shouldPauseIA) {
+      await supabase.from('conversas').update({ ia_active: false }).eq('id', conversa.id);
+      console.log(`🟡 [AUTO_PAUSE] IA pausada na conversa ${conversa.id} — motivo: ${pauseReason}`);
+    }
   } catch (err) {
     console.error('[BUFFER] Erro processando:', err.message);
   }
