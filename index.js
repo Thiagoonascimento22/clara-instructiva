@@ -399,6 +399,89 @@ async function chamarGemini(systemPrompt, historico, userMessage) {
   };
 }
 
+// ════════════════════════════════════════════════════════════════
+// WHISPER — Transcreve áudio do WhatsApp pra texto (OpenAI)
+// Custo: $0.006/min — barato, preciso em PT-BR
+// ════════════════════════════════════════════════════════════════
+async function transcreverAudioWhisper(mediaDownloadUrl, mimeType) {
+  try {
+    if (!process.env.OPENAI_API_KEY) {
+      console.warn('[Whisper] OPENAI_API_KEY não configurada no Railway — pulando transcrição');
+      return null;
+    }
+    // 1. Baixa o áudio da Meta
+    const audioResp = await axios.get(mediaDownloadUrl, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+      responseType: 'arraybuffer'
+    });
+    const audioBuffer = Buffer.from(audioResp.data);
+    console.log(`[Whisper] Áudio baixado: ${audioBuffer.length} bytes (${mimeType || 'audio/ogg'})`);
+
+    // 2. Detecta extensão pelo mime-type
+    let ext = 'ogg';
+    if ((mimeType || '').includes('mpeg') || (mimeType || '').includes('mp3')) ext = 'mp3';
+    else if ((mimeType || '').includes('mp4') || (mimeType || '').includes('m4a')) ext = 'm4a';
+    else if ((mimeType || '').includes('wav')) ext = 'wav';
+    else if ((mimeType || '').includes('webm')) ext = 'webm';
+
+    // 3. Monta multipart pra Whisper
+    const form = new FormData();
+    form.append('file', audioBuffer, { filename: `audio.${ext}`, contentType: mimeType || 'audio/ogg' });
+    form.append('model', 'whisper-1');
+    form.append('language', 'pt');
+    form.append('response_format', 'text');
+
+    // 4. POST pro Whisper API
+    const r = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
+      headers: {
+        ...form.getHeaders(),
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      timeout: 60000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    });
+    const texto = String(r.data || '').trim();
+    console.log(`[Whisper] ✓ Transcrição: "${texto.slice(0, 100)}${texto.length > 100 ? '...' : ''}"`);
+
+    // 5. Salva gasto em background
+    salvarGastoWhisper(audioBuffer.length).catch(e => console.error('[Whisper] erro gasto:', e.message));
+    return texto || null;
+  } catch (err) {
+    console.error('[Whisper] erro transcrevendo:', err.response?.data || err.message);
+    return null;
+  }
+}
+
+async function salvarGastoWhisper(audioBytes) {
+  // Estimativa: áudio WhatsApp ≈ 25KB/s (Opus 16kbps)
+  const duracaoSegundos = audioBytes / 25000;
+  const duracaoMinutos = duracaoSegundos / 60;
+  const custoUSD = duracaoMinutos * 0.006; // $0.006/min Whisper
+  if (custoUSD <= 0) return;
+  const cotacao = await getCotacaoUSDBRL();
+  const custoBRL = custoUSD * cotacao;
+  const hoje = new Date().toISOString().slice(0, 10);
+  const categoria = 'Tokens IA';
+  const { data: existing } = await supabase
+    .from('gastos')
+    .select('id, valor')
+    .eq('data', hoje)
+    .eq('categoria', categoria)
+    .eq('source', 'whisper_auto')
+    .limit(1);
+  if (existing && existing.length > 0) {
+    const novoValor = parseFloat(existing[0].valor) + custoBRL;
+    await supabase.from('gastos').update({ valor: novoValor }).eq('id', existing[0].id);
+  } else {
+    await supabase.from('gastos').insert({
+      valor: custoBRL, data: hoje, categoria,
+      canal: 'whisper', descricao: 'Transcrição de áudios (Whisper)',
+      source: 'whisper_auto'
+    });
+  }
+}
+
 async function chamarOpenAI(systemPrompt, historico, userMessage) {
   if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY não configurada no Railway');
   const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
@@ -1048,9 +1131,9 @@ app.post('/webhook', async (req, res) => {
 
 // ════════════════════════════════════════════════════════════════
 // PROCESSAR MÍDIA RECEBIDA DO LEAD
-// Quando lead manda áudio/imagem/documento, baixa da Meta e salva
-// como mensagem com media_url. NÃO faz IA responder (pra Clara não
-// tentar responder algo que não entendeu).
+// - ÁUDIO: transcreve com Whisper (OpenAI) e Clara responde normalmente
+//   (controle pela env CLARA_AUDIO_ENABLED=false pra desligar)
+// - IMAGEM/VÍDEO/DOC: só salva, sem resposta automática
 // ════════════════════════════════════════════════════════════════
 async function processarMidiaRecebida(from, message, profileName, whatsappNumberId = null) {
   try {
@@ -1081,7 +1164,20 @@ async function processarMidiaRecebida(from, message, profileName, whatsappNumber
 
     const filename = mediaObj.filename || `${msgType}_${Date.now()}`;
     const caption = message[msgType]?.caption || '';
-    const content = caption || `[${msgType === 'audio' ? '🎤 Áudio' : msgType === 'image' ? '🖼️ Imagem' : msgType === 'video' ? '🎥 Vídeo' : '📎 Documento'}]`;
+    let content = caption || `[${msgType === 'audio' ? '🎤 Áudio' : msgType === 'image' ? '🖼️ Imagem' : msgType === 'video' ? '🎥 Vídeo' : '📎 Documento'}]`;
+
+    // ⭐ ÁUDIO: TRANSCREVE COM WHISPER ANTES DE SALVAR
+    // Assim Clara entende o que foi dito e responde normalmente.
+    let textoTranscrito = null;
+    if (msgType === 'audio' && process.env.CLARA_AUDIO_ENABLED !== 'false') {
+      console.log(`🎤 [ÁUDIO] Recebido de ${from} — chamando Whisper...`);
+      textoTranscrito = await transcreverAudioWhisper(mediaDownloadUrl, mimeType);
+      if (textoTranscrito) {
+        // Usa transcrição como content. Como NÃO começa com '[', o frontend
+        // renderiza o player de áudio E a transcrição como caption abaixo.
+        content = textoTranscrito;
+      }
+    }
 
     await supabase.from('mensagens').insert({
       conversa_id: conversa.id,
@@ -1107,6 +1203,12 @@ async function processarMidiaRecebida(from, message, profileName, whatsappNumber
       .in('status', ['enviado', 'entregue', 'lido']);
 
     console.log(`✅ Mídia ${msgType} salva (id Meta: ${mediaObj.id})`);
+
+    // ⭐ ÁUDIO: Se transcreveu, joga a transcrição no buffer pra Clara responder normalmente
+    if (msgType === 'audio' && textoTranscrito) {
+      console.log(`🎤 [ÁUDIO] Joga transcrição no buffer pra Clara responder`);
+      await bufferarMensagem(from, textoTranscrito, profileName, message.id, whatsappNumberId);
+    }
   } catch (err) {
     console.error('Erro processarMidiaRecebida:', err.response?.data || err.message);
   }
