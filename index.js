@@ -172,6 +172,111 @@ async function sendWhatsAppMessage(to, message, creds = null) {
   }
 }
 
+// ════════════════════════════════════════════════════════════════
+// TTS — Text-to-Speech (Clara responde em áudio quando lead pede)
+// Usa OpenAI tts-1 (voz 'nova' por default — feminina jovem em PT-BR)
+// Custo: ~$0.015/1000 chars = R$ 0.01 a R$ 0.03 por resposta de áudio
+// ════════════════════════════════════════════════════════════════
+async function gerarAudioTTS(texto, voice = 'nova') {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY não configurada — não posso gerar TTS');
+  }
+  const model = process.env.OPENAI_TTS_MODEL || 'tts-1';
+  // WhatsApp aceita: audio/ogg (opus) é o nativo. opus é o mais compatível.
+  const r = await axios.post('https://api.openai.com/v1/audio/speech', {
+    model,
+    voice,
+    input: String(texto || '').slice(0, 4096),  // limite OpenAI: 4096 chars
+    response_format: 'opus'
+  }, {
+    headers: {
+      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    responseType: 'arraybuffer',
+    timeout: 60000,
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity
+  });
+  return Buffer.from(r.data);
+}
+
+// Upload de arquivo de áudio pra Meta Media API → retorna media_id
+async function uploadAudioParaMeta(audioBuffer, creds) {
+  const c = creds || getCredsFromEnv();
+  if (!c) throw new Error('Sem credenciais WhatsApp configuradas');
+  const url = `https://graph.facebook.com/v22.0/${c.phone_number_id}/media`;
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', 'audio/ogg');
+  form.append('file', audioBuffer, { filename: 'voice.ogg', contentType: 'audio/ogg' });
+  const r = await axios.post(url, form, {
+    headers: {
+      ...form.getHeaders(),
+      'Authorization': `Bearer ${c.access_token}`
+    },
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity
+  });
+  return r.data?.id;
+}
+
+// Envia mensagem do tipo áudio pelo WhatsApp (gera TTS + upload + envia)
+async function sendWhatsAppAudio(to, texto, creds = null) {
+  const c = creds || getCredsFromEnv();
+  if (!c) throw new Error('Sem credenciais WhatsApp configuradas');
+  const voice = process.env.CLARA_TTS_VOICE || 'nova';
+  // 1. Gera áudio via OpenAI TTS
+  console.log(`🔊 [TTS] Gerando áudio voz=${voice} chars=${(texto || '').length}`);
+  const audioBuffer = await gerarAudioTTS(texto, voice);
+  console.log(`🔊 [TTS] Áudio gerado: ${audioBuffer.length} bytes`);
+  // 2. Upload pra Meta
+  const mediaId = await uploadAudioParaMeta(audioBuffer, c);
+  console.log(`🔊 [TTS] Upload Meta OK: media_id=${mediaId}`);
+  // 3. Envia mensagem de áudio pra o lead
+  const url = `https://graph.facebook.com/v22.0/${c.phone_number_id}/messages`;
+  const r = await axios.post(url, {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'audio',
+    audio: { id: mediaId }
+  }, {
+    headers: { Authorization: `Bearer ${c.access_token}` }
+  });
+  console.log(`🔊 [TTS] Áudio enviado para ${to}`);
+  // 4. Salva gasto em background
+  salvarGastoTTS((texto || '').length).catch(e => console.error('[TTS] erro gasto:', e.message));
+  return { ok: true, mediaId, messageId: r.data?.messages?.[0]?.id };
+}
+
+async function salvarGastoTTS(chars) {
+  if (!chars) return;
+  const PRECO_TTS_PER_MILLION = 15; // $15/M chars (tts-1)
+  const custoUSD = (chars / 1_000_000) * PRECO_TTS_PER_MILLION;
+  if (custoUSD <= 0) return;
+  const cotacao = await getCotacaoUSDBRL();
+  const custoBRL = custoUSD * cotacao;
+  const hoje = new Date().toISOString().slice(0, 10);
+  const categoria = 'Tokens IA';
+  const { data: existing } = await supabase
+    .from('gastos')
+    .select('id, valor')
+    .eq('data', hoje)
+    .eq('categoria', categoria)
+    .eq('source', 'tts_auto')
+    .limit(1);
+  if (existing && existing.length > 0) {
+    const novoValor = parseFloat(existing[0].valor) + custoBRL;
+    await supabase.from('gastos').update({ valor: novoValor }).eq('id', existing[0].id);
+  } else {
+    await supabase.from('gastos').insert({
+      valor: custoBRL, data: hoje, categoria,
+      canal: 'tts', descricao: 'TTS - Clara respondendo em áudio',
+      source: 'tts_auto'
+    });
+  }
+}
+
 async function sendWhatsAppTemplate(to, templateName, language, variables = [], creds = null) {
   const c = creds || getCredsFromEnv();
   if (!c) return { ok: false, error: 'Sem credenciais WhatsApp configuradas' };
@@ -635,7 +740,9 @@ async function askClara(userMessage, historico = [], agente = null, nomeLead = n
   const periodo = horaBrasilia < 12 ? 'manhã' : horaBrasilia < 18 ? 'tarde' : 'noite';
   const contextoTemporal = `\n\n═══ DATA E HORA ATUAL ═══\nAgora é ${dataBrasilia} (horário de Brasília). Você está conversando durante a ${periodo}.\n- Saudações (quando fizer sentido): "Bom dia" (até 12h), "Boa tarde" (12h-18h), "Boa noite" (após 18h)\n- Encerramentos: "Tenha um ótimo dia" (manhã/tarde até 18h), "Tenha uma boa noite" (após 18h)\n- Use bom senso: não fale "vai dormir bem" às 9h da manhã, não fale "tenha um bom começo de dia" às 23h`;
 
-  const systemPrompt = promptBase + baseConhecimento + contextoTemporal + regraNome;
+  // Regra de áudio: Clara só responde em áudio se o lead pedir explicitamente
+  const regraAudio = `\n\n═══ FORMATO DE RESPOSTA (TEXTO vs ÁUDIO) ═══\nVocê PODE responder em ÁUDIO (e SÓ deve fazer isso) quando o lead pedir EXPLICITAMENTE — frases como "manda áudio", "responde por áudio", "fala em áudio", "pode mandar de voz?", "manda em voz", "manda um áudio explicando", "prefiro áudio".\n\nQuando for responder em áudio:\n1. Comece a resposta com o marcador EXATO [AUDIO] (sem aspas, na primeira linha)\n2. Escreva o texto da forma como será FALADO (use vírgulas pra dar pausas naturais, evite "rs", "kkk", emojis em excesso, parênteses)\n3. Mantenha curto: até ~80 palavras (~30 segundos de áudio)\n4. Fale como pessoa, natural, sem ler\n\nEm TODOS os outros casos (default), responde em texto normal SEM o marcador [AUDIO].`;
+  const systemPrompt = promptBase + baseConhecimento + contextoTemporal + regraNome + regraAudio;
 
   // Multi-provider: usa Gemini, GPT ou Claude baseado em env var AI_PROVIDER
   const resultado = await gerarRespostaIA(systemPrompt, historico, userMessage);
@@ -1385,12 +1492,29 @@ async function processarBufferDoLead(from) {
       }
     }
 
+    // ⭐ ÁUDIO: detecta marcador [AUDIO] no início → Clara responde em áudio (TTS)
+    let enviarComoAudio = false;
+    if (/^\s*\[AUDIO\]/i.test(reply)) {
+      enviarComoAudio = true;
+      reply = reply.replace(/^\s*\[AUDIO\]\s*/i, '').trim();
+      console.log(`🔊 [BUFFER] Clara decidiu responder em ÁUDIO (lead pediu)`);
+    }
+
     const tempoEspera = calcularTempoDigitando(reply);
     console.log(`[BUFFER] Aguardando ${tempoEspera}ms antes de responder`);
     await new Promise(r => setTimeout(r, tempoEspera));
 
     await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
-    await sendWhatsAppMessage(from, reply, creds);
+    if (enviarComoAudio) {
+      try {
+        await sendWhatsAppAudio(from, reply, creds);
+      } catch (audioErr) {
+        console.error('🔊 [TTS] Falhou áudio, caindo pra texto:', audioErr.response?.data || audioErr.message);
+        await sendWhatsAppMessage(from, reply, creds);
+      }
+    } else {
+      await sendWhatsAppMessage(from, reply, creds);
+    }
 
     // Auto-pause da IA: Clara sinalizou que precisa de humano (ex: boleto)
     if (shouldPauseIA) {
