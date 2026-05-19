@@ -3848,10 +3848,19 @@ app.post('/api/preview-agente', async (req, res) => {
       return res.json({ ok: false, error: 'Mensagens obrigatórias' });
     }
     const sp = system_prompt?.trim() || 'Você é a Clara, assistente de vendas da Escola Instructiva. Responda de forma natural e amigável em até 3 linhas.';
-    const reply = await chamarOpenAI(sp, messages.slice(0, -1), messages[messages.length - 1].content);
+    // Separar histórico anterior e última mensagem do usuário
+    const historico = messages.slice(0, -1).map(m => ({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: String(m.content || '')
+    }));
+    const lastMsg = messages[messages.length - 1];
+    const userMessage = String(lastMsg?.content || '');
+    // Usa o mesmo provider configurado no Railway (AI_PROVIDER)
+    const resultado = await gerarRespostaIA(sp, historico, userMessage);
+    const reply = typeof resultado === 'string' ? resultado : (resultado?.reply || '(sem resposta)');
     res.json({ ok: true, reply });
   } catch (err) {
-    console.error('[preview-agente]', err.message);
+    console.error('[preview-agente]', err.response?.data || err.message);
     res.json({ ok: false, error: err.message });
   }
 });
