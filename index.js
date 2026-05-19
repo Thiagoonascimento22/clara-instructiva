@@ -456,8 +456,12 @@ async function getOrCreateConversa(leadId, whatsappNumberId = null) {
   return nova;
 }
 
-async function salvarMensagem(conversaId, leadId, role, content) {
-  await supabase.from('mensagens').insert({ conversa_id: conversaId, lead_id: leadId, role, content });
+async function salvarMensagem(conversaId, leadId, role, content, opts = {}) {
+  const row = { conversa_id: conversaId, lead_id: leadId, role, content };
+  if (opts.mediaType) row.media_type = opts.mediaType;
+  if (opts.mediaUrl) row.media_url = opts.mediaUrl;
+  if (opts.mediaFilename) row.media_filename = opts.mediaFilename;
+  await supabase.from('mensagens').insert(row);
   await supabase.from('conversas').update({ updated_at: new Date() }).eq('id', conversaId);
 }
 
@@ -1576,15 +1580,24 @@ async function processarBufferDoLead(from) {
     console.log(`[BUFFER] Aguardando ${tempoEspera}ms antes de responder`);
     await new Promise(r => setTimeout(r, tempoEspera));
 
-    await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
     if (enviarComoAudio) {
       try {
-        await sendWhatsAppAudio(from, reply, creds);
+        const audioResult = await sendWhatsAppAudio(from, reply, creds);
+        // Salva mensagem COM info de áudio — frontend renderiza player automaticamente
+        await salvarMensagem(conversa.id, lead.id, 'assistant', reply, {
+          mediaType: 'audio',
+          mediaUrl: audioResult.mediaId,
+          mediaFilename: 'voice.ogg'
+        });
+        console.log(`💾 [TTS] Áudio salvo no banco com media_url=${audioResult.mediaId}`);
       } catch (audioErr) {
         console.error('🔊 [TTS] Falhou áudio, caindo pra texto:', audioErr.response?.data || audioErr.message);
+        // Fallback: salva e envia como texto normal
+        await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
         await sendWhatsAppMessage(from, reply, creds);
       }
     } else {
+      await salvarMensagem(conversa.id, lead.id, 'assistant', reply);
       await sendWhatsAppMessage(from, reply, creds);
     }
 
