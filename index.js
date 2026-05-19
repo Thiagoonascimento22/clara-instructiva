@@ -1560,18 +1560,13 @@ async function processarBufferDoLead(from) {
       console.log(`🔊 [BUFFER] Clara decidiu responder em ÁUDIO (lead pediu)`);
     }
 
-    // ⭐ TYPING INDICATOR — envia com o tipo CORRETO:
-    // - Se vai ser áudio: tenta type:'audio' ('gravando áudio...' — não documentado pela Meta)
-    //   Se Meta REJEITAR → cai pra type:'text' ('digitando...') pra pelo menos dar feedback ao lead
-    // - Se vai ser texto: envia type:'text' direto
+    // ⭐ TYPING INDICATOR — só envia 'digitando...' quando for TEXTO
+    // Pra áudio: tenta type:'audio' (não documentado). Se Meta rejeitar, fica SEM indicador
+    // (não cai pra 'digitando...' porque é incoerente mostrar "digitando" e mandar áudio)
     if (lastMessageId) {
       if (enviarComoAudio) {
-        const okAudio = await sendTypingIndicator(lastMessageId, creds, 'audio');
-        if (!okAudio) {
-          // Fallback: ao menos mostra "digitando..." pra lead saber que algo tá vindo
-          console.log(`📝 [BUFFER] Fallback typing: 'audio' rejeitado, usando 'text'`);
-          await sendTypingIndicator(lastMessageId, creds, 'text');
-        }
+        await sendTypingIndicator(lastMessageId, creds, 'audio');
+        // Se falhar, fica sem indicador — coerente com "vou mandar áudio"
       } else {
         await sendTypingIndicator(lastMessageId, creds, 'text');
       }
