@@ -177,16 +177,51 @@ async function sendWhatsAppMessage(to, message, creds = null) {
 // Usa OpenAI tts-1 (voz 'nova' por default — feminina jovem em PT-BR)
 // Custo: ~$0.015/1000 chars = R$ 0.01 a R$ 0.03 por resposta de áudio
 // ════════════════════════════════════════════════════════════════
-async function gerarAudioTTS(texto, voice = 'nova') {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error('OPENAI_API_KEY não configurada — não posso gerar TTS');
+async function gerarAudioTTS(texto, voice = null) {
+  const useEleven = !!process.env.ELEVENLABS_API_KEY;
+  
+  // === ELEVENLABS (qualidade superior, voz brasileira natural) ===
+  if (useEleven) {
+    const voiceId = voice || process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM'; // Rachel default
+    const model = process.env.ELEVENLABS_MODEL || 'eleven_multilingual_v2';
+    console.log(`🔊 [TTS/ElevenLabs] voice=${voiceId.slice(0,8)}... model=${model}`);
+    const r = await axios.post(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
+      {
+        text: String(texto || '').slice(0, 5000),
+        model_id: model,
+        voice_settings: {
+          stability: parseFloat(process.env.ELEVENLABS_STABILITY || '0.5'),
+          similarity_boost: parseFloat(process.env.ELEVENLABS_SIMILARITY || '0.75'),
+          style: parseFloat(process.env.ELEVENLABS_STYLE || '0.3'),
+          use_speaker_boost: true
+        }
+      },
+      {
+        headers: {
+          'xi-api-key': process.env.ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        responseType: 'arraybuffer',
+        timeout: 60000,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      }
+    );
+    return { buffer: Buffer.from(r.data), mimeType: 'audio/mpeg', ext: 'mp3' };
   }
+  
+  // === OPENAI TTS (fallback se ElevenLabs não configurado) ===
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error('Nem OPENAI_API_KEY nem ELEVENLABS_API_KEY configuradas');
+  }
+  const openaiVoice = voice || process.env.CLARA_TTS_VOICE || 'nova';
   const model = process.env.OPENAI_TTS_MODEL || 'tts-1';
-  // WhatsApp aceita: audio/ogg (opus) é o nativo. opus é o mais compatível.
+  console.log(`🔊 [TTS/OpenAI] voice=${openaiVoice} model=${model}`);
   const r = await axios.post('https://api.openai.com/v1/audio/speech', {
     model,
-    voice,
-    input: String(texto || '').slice(0, 4096),  // limite OpenAI: 4096 chars
+    voice: openaiVoice,
+    input: String(texto || '').slice(0, 4096),
     response_format: 'opus'
   }, {
     headers: {
@@ -198,18 +233,25 @@ async function gerarAudioTTS(texto, voice = 'nova') {
     maxContentLength: Infinity,
     maxBodyLength: Infinity
   });
-  return Buffer.from(r.data);
+  return { buffer: Buffer.from(r.data), mimeType: 'audio/ogg', ext: 'ogg' };
 }
 
 // Upload de arquivo de áudio pra Meta Media API → retorna media_id
-async function uploadAudioParaMeta(audioBuffer, creds) {
+async function uploadAudioParaMeta(audioData, creds) {
   const c = creds || getCredsFromEnv();
   if (!c) throw new Error('Sem credenciais WhatsApp configuradas');
+  // audioData pode ser Buffer (legado) ou objeto {buffer, mimeType, ext}
+  let buffer, mimeType, ext;
+  if (Buffer.isBuffer(audioData)) {
+    buffer = audioData; mimeType = 'audio/ogg'; ext = 'ogg';
+  } else {
+    buffer = audioData.buffer; mimeType = audioData.mimeType || 'audio/ogg'; ext = audioData.ext || 'ogg';
+  }
   const url = `https://graph.facebook.com/v22.0/${c.phone_number_id}/media`;
   const form = new FormData();
   form.append('messaging_product', 'whatsapp');
-  form.append('type', 'audio/ogg');
-  form.append('file', audioBuffer, { filename: 'voice.ogg', contentType: 'audio/ogg' });
+  form.append('type', mimeType);
+  form.append('file', buffer, { filename: `voice.${ext}`, contentType: mimeType });
   const r = await axios.post(url, form, {
     headers: {
       ...form.getHeaders(),
@@ -225,13 +267,12 @@ async function uploadAudioParaMeta(audioBuffer, creds) {
 async function sendWhatsAppAudio(to, texto, creds = null) {
   const c = creds || getCredsFromEnv();
   if (!c) throw new Error('Sem credenciais WhatsApp configuradas');
-  const voice = process.env.CLARA_TTS_VOICE || 'nova';
-  // 1. Gera áudio via OpenAI TTS
-  console.log(`🔊 [TTS] Gerando áudio voz=${voice} chars=${(texto || '').length}`);
-  const audioBuffer = await gerarAudioTTS(texto, voice);
-  console.log(`🔊 [TTS] Áudio gerado: ${audioBuffer.length} bytes`);
+  console.log(`🔊 [TTS] Gerando áudio chars=${(texto || '').length}`);
+  // 1. Gera áudio (ElevenLabs preferencialmente, ou OpenAI)
+  const audioData = await gerarAudioTTS(texto);
+  console.log(`🔊 [TTS] Áudio gerado: ${audioData.buffer.length} bytes (${audioData.mimeType})`);
   // 2. Upload pra Meta
-  const mediaId = await uploadAudioParaMeta(audioBuffer, c);
+  const mediaId = await uploadAudioParaMeta(audioData, c);
   console.log(`🔊 [TTS] Upload Meta OK: media_id=${mediaId}`);
   // 3. Envia mensagem de áudio pra o lead
   const url = `https://graph.facebook.com/v22.0/${c.phone_number_id}/messages`;
@@ -244,26 +285,35 @@ async function sendWhatsAppAudio(to, texto, creds = null) {
     headers: { Authorization: `Bearer ${c.access_token}` }
   });
   console.log(`🔊 [TTS] Áudio enviado para ${to}`);
-  // 4. Salva gasto em background
-  salvarGastoTTS((texto || '').length).catch(e => console.error('[TTS] erro gasto:', e.message));
+  // 4. Salva gasto (preço diferente por provider)
+  const provider = process.env.ELEVENLABS_API_KEY ? 'elevenlabs' : 'openai';
+  salvarGastoTTS((texto || '').length, provider).catch(e => console.error('[TTS] erro gasto:', e.message));
   return { ok: true, mediaId, messageId: r.data?.messages?.[0]?.id };
 }
 
-async function salvarGastoTTS(chars) {
+async function salvarGastoTTS(chars, provider = 'openai') {
   if (!chars) return;
-  const PRECO_TTS_PER_MILLION = 15; // $15/M chars (tts-1)
-  const custoUSD = (chars / 1_000_000) * PRECO_TTS_PER_MILLION;
+  // Preços (USD por 1M chars):
+  // - OpenAI tts-1: $15/M, tts-1-hd: $30/M
+  // - ElevenLabs Multilingual v2: ~$0.30 por 1000 chars no plano Creator (~$300/M); usa estimativa baseada nos planos
+  const precos = {
+    'openai': 15,
+    'elevenlabs': 180 // ~$0.18 por 1k chars em uso pago (estimativa Creator $22/100k)
+  };
+  const precoMillion = precos[provider] || 15;
+  const custoUSD = (chars / 1_000_000) * precoMillion;
   if (custoUSD <= 0) return;
   const cotacao = await getCotacaoUSDBRL();
   const custoBRL = custoUSD * cotacao;
   const hoje = new Date().toISOString().slice(0, 10);
   const categoria = 'Tokens IA';
+  const source = `tts_${provider}_auto`;
   const { data: existing } = await supabase
     .from('gastos')
     .select('id, valor')
     .eq('data', hoje)
     .eq('categoria', categoria)
-    .eq('source', 'tts_auto')
+    .eq('source', source)
     .limit(1);
   if (existing && existing.length > 0) {
     const novoValor = parseFloat(existing[0].valor) + custoBRL;
@@ -271,8 +321,9 @@ async function salvarGastoTTS(chars) {
   } else {
     await supabase.from('gastos').insert({
       valor: custoBRL, data: hoje, categoria,
-      canal: 'tts', descricao: 'TTS - Clara respondendo em áudio',
-      source: 'tts_auto'
+      canal: provider === 'elevenlabs' ? 'elevenlabs' : 'openai-tts',
+      descricao: `TTS - Clara em áudio (${provider})`,
+      source
     });
   }
 }
