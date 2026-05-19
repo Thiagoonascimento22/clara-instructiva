@@ -125,9 +125,9 @@ function invalidarCacheWpp() { wppCredsCache.clear(); }
 // ════════════════════════════════════════════════════════════════
 // HELPERS WHATSAPP
 // ════════════════════════════════════════════════════════════════
-async function sendTypingIndicator(messageId, creds = null) {
+async function sendTypingIndicator(messageId, creds = null, type = 'text') {
   const c = creds || getCredsFromEnv();
-  if (!c) return;
+  if (!c) return false;
   const url = `https://graph.facebook.com/v22.0/${c.phone_number_id}/messages`;
   try {
     await axios.post(
@@ -136,13 +136,21 @@ async function sendTypingIndicator(messageId, creds = null) {
         messaging_product: 'whatsapp',
         status: 'read',
         message_id: messageId,
-        typing_indicator: { type: 'text' }
+        typing_indicator: { type }
       },
       { headers: { Authorization: `Bearer ${c.access_token}` } }
     );
-    console.log(`✓ Typing indicator enviado pra mensagem ${messageId}`);
+    console.log(`✓ Typing indicator '${type}' enviado pra mensagem ${messageId}`);
+    return true;
   } catch (err) {
-    console.error('Erro typing indicator:', err.response?.data?.error?.message || err.message);
+    const errMsg = err.response?.data?.error?.message || err.message;
+    if (type === 'audio') {
+      // Meta provavelmente rejeitou type:'audio' (não documentado). Não cai pra text — fica sem indicador.
+      console.warn(`⚠️ Meta rejeitou typing_indicator type:'audio' (esperado, não documentado): ${errMsg}`);
+    } else {
+      console.error(`Erro typing indicator (type=${type}):`, errMsg);
+    }
+    return false;
   }
 }
 
@@ -1518,7 +1526,8 @@ async function processarBufferDoLead(from) {
       return;
     }
 
-    if (lastMessageId) await sendTypingIndicator(lastMessageId, creds);
+    // Typing indicator será enviado DEPOIS de saber se Clara vai responder texto ou áudio
+    // (assim podemos tentar type:'audio' quando for áudio, ou type:'text' quando for texto)
 
     // Manda o texto COMBINADO pro Gemini — assim ela responde considerando todas as msgs juntas
     let reply = await askClara(textoCombinado, historico, agente, lead?.name);
@@ -1549,6 +1558,14 @@ async function processarBufferDoLead(from) {
       enviarComoAudio = true;
       reply = reply.replace(/^\s*\[AUDIO\]\s*/i, '').trim();
       console.log(`🔊 [BUFFER] Clara decidiu responder em ÁUDIO (lead pediu)`);
+    }
+
+    // ⭐ TYPING INDICATOR — agora envia com o tipo CORRETO:
+    // - Se vai ser áudio: tenta type:'audio' ('gravando áudio...' — não documentado pela Meta, pode falhar)
+    //   Se falhar, fica SEM indicador (não cai pra 'text' pra não mostrar 'digitando...' falso)
+    // - Se vai ser texto: envia type:'text' ('digitando...') normal
+    if (lastMessageId) {
+      await sendTypingIndicator(lastMessageId, creds, enviarComoAudio ? 'audio' : 'text');
     }
 
     const tempoEspera = calcularTempoDigitando(reply);
