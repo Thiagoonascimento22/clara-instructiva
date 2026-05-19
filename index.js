@@ -3837,4 +3837,23 @@ Gere AGORA a próxima mensagem da Clara nesta conversa, no tom natural dela.`;
 });
 
 
+// ============================================================
+// PREVIEW AO VIVO — testa a Clara com o system prompt atual
+// Chamado pelo modal de edição de agentes no Forge Sales
+// ============================================================
+app.post('/api/preview-agente', async (req, res) => {
+  try {
+    const { system_prompt, messages } = req.body;
+    if (!messages || !messages.length) {
+      return res.json({ ok: false, error: 'Mensagens obrigatórias' });
+    }
+    const sp = system_prompt?.trim() || 'Você é a Clara, assistente de vendas da Escola Instructiva. Responda de forma natural e amigável em até 3 linhas.';
+    const reply = await chamarOpenAI(sp, messages.slice(0, -1), messages[messages.length - 1].content);
+    res.json({ ok: true, reply });
+  } catch (err) {
+    console.error('[preview-agente]', err.message);
+    res.json({ ok: false, error: err.message });
+  }
+});
+
 app.listen(PORT, () => console.log(`Clara v3 rodando na porta ${PORT}`));
