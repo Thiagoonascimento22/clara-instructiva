@@ -3878,30 +3878,37 @@ app.get('/api/vendedoras/desempenho', async (req, res) => {
     const empresaId = req.query.empresa_id;
     if (!empresaId) return res.status(400).json({ ok: false, error: 'empresa_id obrigatório' });
 
-    const inicio = req.query.inicio || null; // filtro opcional por data de venda
+    const inicio = req.query.inicio || null;
     const fim = req.query.fim || null;
 
-    // 1. Agentes ativos da empresa = as "vendedoras"
+    // 1. Vendedoras da empresa
+    const { data: vends } = await supabase
+      .from('vendedoras')
+      .select('id, nome, avatar, ativo, whatsapp_number_id')
+      .eq('empresa_id', empresaId)
+      .order('created_at');
+    const vendedorasArr = vends || [];
+
+    // 2. Agentes da empresa (pra mapear agente -> vendedora e resolver cascata)
     const { data: agentes } = await supabase
       .from('agentes')
-      .select('id, nome, is_default, ativo')
+      .select('id, nome, is_default, ativo, vendedora_id')
       .eq('empresa_id', empresaId)
-      .eq('ativo', true)
-      .order('nome');
-    if (!agentes || !agentes.length) {
-      return res.json({ ok: true, vendedoras: [], resumo: vazioResumo(), atencao: [] });
-    }
-    const agentePadrao = agentes.find(a => a.is_default) || null;
+      .eq('ativo', true);
+    const agentesArr = agentes || [];
+    const agentePadrao = agentesArr.find(a => a.is_default) || null;
+    const agenteToVendedora = {};
+    agentesArr.forEach(a => { if (a.vendedora_id) agenteToVendedora[a.id] = a.vendedora_id; });
 
-    // 2. Conversas da empresa (não arquivadas) + dados pra resolver o agente
+    // 3. Conversas da empresa (não arquivadas)
     const { data: conversas } = await supabase
       .from('conversas')
-      .select('id, lead_id, status, ia_active, arquivada, agente_id_override, campanha_id, pipeline_stage, updated_at, leads(name, phone)')
+      .select('id, lead_id, status, ia_active, arquivada, agente_id_override, campanha_id, pipeline_stage, pipeline_travado, updated_at, leads(name, phone)')
       .eq('empresa_id', empresaId)
       .eq('arquivada', false);
     const convs = conversas || [];
 
-    // 3. Mapa campanha -> agente_id (pra resolver conversas que vieram de campanha)
+    // 4. Mapa campanha -> agente_id
     const campIds = [...new Set(convs.map(c => c.campanha_id).filter(Boolean))];
     let campToAgente = {};
     if (campIds.length) {
@@ -3912,94 +3919,86 @@ app.get('/api/vendedoras/desempenho', async (req, res) => {
       (camps || []).forEach(c => { campToAgente[c.id] = c.agente_id; });
     }
 
-    // Resolve qual agente conduziu a conversa (mesma cascata do webhook)
+    // Resolve agente da conversa (cascata) e depois a vendedora dona dele
     const resolveAgente = (c) => {
       if (c.agente_id_override) return c.agente_id_override;
       if (c.campanha_id && campToAgente[c.campanha_id]) return campToAgente[c.campanha_id];
       return agentePadrao ? agentePadrao.id : null;
     };
+    const resolveVendedora = (c) => {
+      const aid = resolveAgente(c);
+      return aid ? (agenteToVendedora[aid] || null) : null;
+    };
 
-    // lead_id -> agente_id (pra cruzar com vendas). Se um lead tem várias conversas,
-    // usa a mais recente (já filtramos não-arquivadas; convs vêm sem ordem garantida então ordenamos).
+    // lead_id -> vendedora (conversa mais recente do lead)
     const convsOrdenadas = [...convs].sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
-    const leadToAgente = {};
+    const leadToVendedora = {};
     for (const c of convsOrdenadas) {
-      if (c.lead_id && !leadToAgente[c.lead_id]) leadToAgente[c.lead_id] = resolveAgente(c);
+      if (c.lead_id && !(c.lead_id in leadToVendedora)) leadToVendedora[c.lead_id] = resolveVendedora(c);
     }
 
-    // 4. Vendas da empresa (vinculadas a lead) no período
+    // 5. Vendas da empresa no período
     let vendasQuery = supabase
       .from('vendas')
-      .select('id, lead_id, valor, valor_recebido, data, cliente_nome')
+      .select('id, lead_id, valor, valor_recebido, data')
       .eq('empresa_id', empresaId);
     if (inicio) vendasQuery = vendasQuery.gte('data', inicio);
     if (fim) vendasQuery = vendasQuery.lte('data', fim);
     const { data: vendas } = await vendasQuery;
     const vendasArr = vendas || [];
 
-    // 5. Inicializa acumulador por agente
-    const porAgente = {};
-    agentes.forEach(a => {
-      porAgente[a.id] = {
-        agente_id: a.id, nome: a.nome, is_default: !!a.is_default,
-        conversas_ativas: 0, precisam_atencao: 0,
-        vendas: 0, faturamento_bruto: 0, faturamento_liquido: 0,
+    // 6. Acumulador por vendedora
+    const porVend = {};
+    vendedorasArr.forEach(v => {
+      porVend[v.id] = {
+        vendedora_id: v.id, nome: v.nome, avatar: v.avatar || null, ativo: v.ativo !== false,
+        conversas_ativas: 0, precisam_atencao: 0, total_conversas: 0,
+        vendas: 0, faturamento_bruto: 0, faturamento_liquido: 0, conversao: 0,
       };
     });
 
-    // 6. Conta conversas ativas e "precisam de atenção" por agente
-    // "Ativa" = status aberta e IA ligada. "Atenção" = IA pausada (humano deveria assumir)
-    // OU pipeline travado.
+    // 7. Conta conversas por vendedora + monta lista de atenção
     const atencaoLista = [];
     for (const c of convs) {
-      const aid = resolveAgente(c);
-      if (!aid || !porAgente[aid]) continue;
+      const vid = resolveVendedora(c);
+      if (!vid || !porVend[vid]) continue;
+      porVend[vid].total_conversas++;
       const aberta = c.status === 'aberta';
-      if (aberta && c.ia_active !== false) porAgente[aid].conversas_ativas++;
+      if (aberta && c.ia_active !== false) porVend[vid].conversas_ativas++;
       const precisa = (c.ia_active === false && aberta) || c.pipeline_travado === true;
       if (precisa) {
-        porAgente[aid].precisam_atencao++;
+        porVend[vid].precisam_atencao++;
         atencaoLista.push({
           conversa_id: c.id,
           lead_nome: c.leads?.name || (c.leads?.phone || 'Sem nome'),
-          agente_nome: porAgente[aid].nome,
+          vendedora_nome: porVend[vid].nome,
           motivo: c.ia_active === false ? 'IA pausada — aguardando humano' : 'pipeline travado',
           updated_at: c.updated_at,
         });
       }
     }
 
-    // 7. Atribui vendas ao agente que conduziu a conversa daquele lead
+    // 8. Vendas por vendedora
     let totalVendas = 0, totalBruto = 0, totalLiquido = 0;
     for (const v of vendasArr) {
       const liq = v.valor_recebido != null ? Number(v.valor_recebido) : Number(v.valor || 0);
       const bru = Number(v.valor || 0);
       totalVendas++; totalBruto += bru; totalLiquido += liq;
-      const aid = v.lead_id ? leadToAgente[v.lead_id] : null;
-      if (aid && porAgente[aid]) {
-        porAgente[aid].vendas++;
-        porAgente[aid].faturamento_bruto += bru;
-        porAgente[aid].faturamento_liquido += liq;
+      const vid = v.lead_id ? leadToVendedora[v.lead_id] : null;
+      if (vid && porVend[vid]) {
+        porVend[vid].vendas++;
+        porVend[vid].faturamento_bruto += bru;
+        porVend[vid].faturamento_liquido += liq;
       }
     }
 
-    // 8. Calcula taxa de conversão por agente (vendas / conversas que ela conduziu no total)
-    // Total conduzido = ativas + atenção + já fechadas. Aproximação simples e honesta:
-    // usa total de conversas distintas que apontam pra ela.
-    const totalConvPorAgente = {};
-    for (const c of convs) {
-      const aid = resolveAgente(c);
-      if (aid) totalConvPorAgente[aid] = (totalConvPorAgente[aid] || 0) + 1;
-    }
-    const vendedoras = agentes.map(a => {
-      const p = porAgente[a.id];
-      const base = totalConvPorAgente[a.id] || 0;
-      p.total_conversas = base;
-      p.conversao = base > 0 ? Math.round((p.vendas / base) * 100) : 0;
+    // 9. Conversão por vendedora
+    const vendedoras = vendedorasArr.map(v => {
+      const p = porVend[v.id];
+      p.conversao = p.total_conversas > 0 ? Math.round((p.vendas / p.total_conversas) * 100) : 0;
       return p;
     });
 
-    // ordena atenção: mais antigas primeiro (esperando há mais tempo)
     atencaoLista.sort((a, b) => new Date(a.updated_at) - new Date(b.updated_at));
 
     const resumo = {
