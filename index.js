@@ -3865,4 +3865,159 @@ app.post('/api/preview-agente', async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════════
+// DASHBOARD DE DESEMPENHO DAS VENDEDORAS (por agente)
+// Usado pela tela "Dashboard" quando dentro de uma empresa (ex: Instructiva Vendas).
+// Calcula, por agente da empresa: conversas ativas, precisam de atenção,
+// vendas atribuídas e faturamento. Atribuição: a conversa do lead foi conduzida
+// por aquele agente (cascata: agente_id_override > agente da campanha > padrão).
+// GET /api/vendedoras/desempenho?empresa_id=...&inicio=YYYY-MM-DD&fim=YYYY-MM-DD
+// ════════════════════════════════════════════════════════════════
+app.get('/api/vendedoras/desempenho', async (req, res) => {
+  try {
+    const empresaId = req.query.empresa_id;
+    if (!empresaId) return res.status(400).json({ ok: false, error: 'empresa_id obrigatório' });
+
+    const inicio = req.query.inicio || null; // filtro opcional por data de venda
+    const fim = req.query.fim || null;
+
+    // 1. Agentes ativos da empresa = as "vendedoras"
+    const { data: agentes } = await supabase
+      .from('agentes')
+      .select('id, nome, is_default, ativo')
+      .eq('empresa_id', empresaId)
+      .eq('ativo', true)
+      .order('nome');
+    if (!agentes || !agentes.length) {
+      return res.json({ ok: true, vendedoras: [], resumo: vazioResumo(), atencao: [] });
+    }
+    const agentePadrao = agentes.find(a => a.is_default) || null;
+
+    // 2. Conversas da empresa (não arquivadas) + dados pra resolver o agente
+    const { data: conversas } = await supabase
+      .from('conversas')
+      .select('id, lead_id, status, ia_active, arquivada, agente_id_override, campanha_id, pipeline_stage, updated_at, leads(name, phone)')
+      .eq('empresa_id', empresaId)
+      .eq('arquivada', false);
+    const convs = conversas || [];
+
+    // 3. Mapa campanha -> agente_id (pra resolver conversas que vieram de campanha)
+    const campIds = [...new Set(convs.map(c => c.campanha_id).filter(Boolean))];
+    let campToAgente = {};
+    if (campIds.length) {
+      const { data: camps } = await supabase
+        .from('campanhas')
+        .select('id, agente_id')
+        .in('id', campIds);
+      (camps || []).forEach(c => { campToAgente[c.id] = c.agente_id; });
+    }
+
+    // Resolve qual agente conduziu a conversa (mesma cascata do webhook)
+    const resolveAgente = (c) => {
+      if (c.agente_id_override) return c.agente_id_override;
+      if (c.campanha_id && campToAgente[c.campanha_id]) return campToAgente[c.campanha_id];
+      return agentePadrao ? agentePadrao.id : null;
+    };
+
+    // lead_id -> agente_id (pra cruzar com vendas). Se um lead tem várias conversas,
+    // usa a mais recente (já filtramos não-arquivadas; convs vêm sem ordem garantida então ordenamos).
+    const convsOrdenadas = [...convs].sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+    const leadToAgente = {};
+    for (const c of convsOrdenadas) {
+      if (c.lead_id && !leadToAgente[c.lead_id]) leadToAgente[c.lead_id] = resolveAgente(c);
+    }
+
+    // 4. Vendas da empresa (vinculadas a lead) no período
+    let vendasQuery = supabase
+      .from('vendas')
+      .select('id, lead_id, valor, valor_recebido, data, cliente_nome')
+      .eq('empresa_id', empresaId);
+    if (inicio) vendasQuery = vendasQuery.gte('data', inicio);
+    if (fim) vendasQuery = vendasQuery.lte('data', fim);
+    const { data: vendas } = await vendasQuery;
+    const vendasArr = vendas || [];
+
+    // 5. Inicializa acumulador por agente
+    const porAgente = {};
+    agentes.forEach(a => {
+      porAgente[a.id] = {
+        agente_id: a.id, nome: a.nome, is_default: !!a.is_default,
+        conversas_ativas: 0, precisam_atencao: 0,
+        vendas: 0, faturamento_bruto: 0, faturamento_liquido: 0,
+      };
+    });
+
+    // 6. Conta conversas ativas e "precisam de atenção" por agente
+    // "Ativa" = status aberta e IA ligada. "Atenção" = IA pausada (humano deveria assumir)
+    // OU pipeline travado.
+    const atencaoLista = [];
+    for (const c of convs) {
+      const aid = resolveAgente(c);
+      if (!aid || !porAgente[aid]) continue;
+      const aberta = c.status === 'aberta';
+      if (aberta && c.ia_active !== false) porAgente[aid].conversas_ativas++;
+      const precisa = (c.ia_active === false && aberta) || c.pipeline_travado === true;
+      if (precisa) {
+        porAgente[aid].precisam_atencao++;
+        atencaoLista.push({
+          conversa_id: c.id,
+          lead_nome: c.leads?.name || (c.leads?.phone || 'Sem nome'),
+          agente_nome: porAgente[aid].nome,
+          motivo: c.ia_active === false ? 'IA pausada — aguardando humano' : 'pipeline travado',
+          updated_at: c.updated_at,
+        });
+      }
+    }
+
+    // 7. Atribui vendas ao agente que conduziu a conversa daquele lead
+    let totalVendas = 0, totalBruto = 0, totalLiquido = 0;
+    for (const v of vendasArr) {
+      const liq = v.valor_recebido != null ? Number(v.valor_recebido) : Number(v.valor || 0);
+      const bru = Number(v.valor || 0);
+      totalVendas++; totalBruto += bru; totalLiquido += liq;
+      const aid = v.lead_id ? leadToAgente[v.lead_id] : null;
+      if (aid && porAgente[aid]) {
+        porAgente[aid].vendas++;
+        porAgente[aid].faturamento_bruto += bru;
+        porAgente[aid].faturamento_liquido += liq;
+      }
+    }
+
+    // 8. Calcula taxa de conversão por agente (vendas / conversas que ela conduziu no total)
+    // Total conduzido = ativas + atenção + já fechadas. Aproximação simples e honesta:
+    // usa total de conversas distintas que apontam pra ela.
+    const totalConvPorAgente = {};
+    for (const c of convs) {
+      const aid = resolveAgente(c);
+      if (aid) totalConvPorAgente[aid] = (totalConvPorAgente[aid] || 0) + 1;
+    }
+    const vendedoras = agentes.map(a => {
+      const p = porAgente[a.id];
+      const base = totalConvPorAgente[a.id] || 0;
+      p.total_conversas = base;
+      p.conversao = base > 0 ? Math.round((p.vendas / base) * 100) : 0;
+      return p;
+    });
+
+    // ordena atenção: mais antigas primeiro (esperando há mais tempo)
+    atencaoLista.sort((a, b) => new Date(a.updated_at) - new Date(b.updated_at));
+
+    const resumo = {
+      total_conversas: convs.length,
+      vendas: totalVendas,
+      faturamento_bruto: totalBruto,
+      faturamento_liquido: totalLiquido,
+      precisam_atencao: atencaoLista.length,
+    };
+
+    return res.json({ ok: true, vendedoras, resumo, atencao: atencaoLista.slice(0, 30) });
+  } catch (e) {
+    console.error('[vendedoras/desempenho] erro:', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+function vazioResumo() {
+  return { total_conversas: 0, vendas: 0, faturamento_bruto: 0, faturamento_liquido: 0, precisam_atencao: 0 };
+}
+
 app.listen(PORT, () => console.log(`Clara v3 rodando na porta ${PORT}`));
